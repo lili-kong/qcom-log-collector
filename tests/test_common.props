@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Shared property sheet for test projects: compiles all library sources into each test executable -->
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup Condition="'$(Platform)'=='Win32'">
+    <LibusbLibDir>$(SolutionDir)src\qcdevice\libusb\lib-1.0.27\lib\x86\release</LibusbLibDir>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Platform)'=='x64'">
+    <LibusbLibDir>$(SolutionDir)src\qcdevice\libusb\lib-1.0.27\lib\x64\release</LibusbLibDir>
+  </PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <AdditionalIncludeDirectories>$(SolutionDir)include;$(SolutionDir)src;$(SolutionDir)src\qcdevice\QDS_WIN;$(SolutionDir)src\qcdevice\common;$(SolutionDir)src\qcdevice\libusb\source;$(SolutionDir)src\qcdevice\libusb\lib-1.0.27\include;$(SolutionDir)src\qcdevice\qds_lnx\inc;$(SolutionDir)src\external\kLogger\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>TOOLS_TARGET_WINDOWS=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+    <Link>
+      <AdditionalDependencies>setupapi.lib;cfgmgr32.lib;shlwapi.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <!-- HDLC sources -->
+    <ClCompile Include="$(SolutionDir)src\hdlc\hdlc.cpp" />
+    <ClCompile Include="$(SolutionDir)src\hdlc\non_hdlc.cpp" />
+    <!-- Diag sources -->
+    <ClCompile Include="$(SolutionDir)src\diag\commands.cpp" />
+    <ClCompile Include="$(SolutionDir)src\diag\cfg_parser.cpp" />
+    <ClCompile Include="$(SolutionDir)src\diag\subsystem_commands.cpp" />
+    <ClCompile Include="$(SolutionDir)src\diag\qdss_commands.cpp" />
+    <ClCompile Include="$(SolutionDir)src\diag\adpl_commands.cpp" />
+    <ClCompile Include="$(SolutionDir)src\diag\handshake_commands.cpp" />
+    <ClCompile Include="$(SolutionDir)src\diag\response_pairing.cpp" />
+    <!-- Transport sources -->
+    <ClCompile Include="$(SolutionDir)src\transport\transport_manager.cpp" />
+    <ClCompile Include="$(SolutionDir)src\transport\qcdevice_transport.cpp" />
+    <ClCompile Include="$(SolutionDir)src\transport\transport_factory.cpp" />
+    <!-- Ptrace sources -->
+    <ClCompile Include="$(SolutionDir)src\ptrace\ptrace_writer.cpp" />
+    <!-- Logger sources -->
+    <ClCompile Include="$(SolutionDir)src\logger\diag_logger.cpp" />
+    <!-- QLC sources -->
+    <ClCompile Include="$(SolutionDir)src\qlc\qlc_writer.cpp" />
+    <!-- QcDevice: Windows sources -->
+    <ClCompile Include="$(SolutionDir)src\qcdevice\QDS_WIN\scandev.cpp">
+      <WarningLevel>TurnOffAllWarnings</WarningLevel>
+      <ConformanceMode>false</ConformanceMode>
+      <SDLCheck>false</SDLCheck>
+    </ClCompile>
+    <ClCompile Include="$(SolutionDir)src\qcdevice\QDS_WIN\QdIoQmi.cpp">
+      <WarningLevel>TurnOffAllWarnings</WarningLevel>
+      <ConformanceMode>false</ConformanceMode>
+      <SDLCheck>false</SDLCheck>
+    </ClCompile>
+    <ClCompile Include="$(SolutionDir)src\qcdevice\libusb\source\qcom-libusb.cpp">
+      <WarningLevel>TurnOffAllWarnings</WarningLevel>
+      <ConformanceMode>false</ConformanceMode>
+      <SDLCheck>false</SDLCheck>
+    </ClCompile>
+    <ClCompile Include="$(SolutionDir)src\qcdevice\libusb\source\libusb-dynamic-loader.cpp">
+      <WarningLevel>TurnOffAllWarnings</WarningLevel>
+      <ConformanceMode>false</ConformanceMode>
+      <SDLCheck>false</SDLCheck>
+    </ClCompile>
+    <ClCompile Include="$(SolutionDir)src\qcdevice\common\utils.cpp">
+      <WarningLevel>TurnOffAllWarnings</WarningLevel>
+      <ConformanceMode>false</ConformanceMode>
+      <SDLCheck>false</SDLCheck>
+    </ClCompile>
+    <ClCompile Include="$(SolutionDir)src\qcdevice\common\qdver.cpp">
+      <WarningLevel>TurnOffAllWarnings</WarningLevel>
+      <ConformanceMode>false</ConformanceMode>
+      <SDLCheck>false</SDLCheck>
+    </ClCompile>
+  </ItemGroup>
+</Project>

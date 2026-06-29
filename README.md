@@ -1,47 +1,176 @@
-**After repository creation:**
-- [ ] Update this `README.md`. Update the Project Name, description, and all sections. Remove this checklist.
-- [ ] If required, update `LICENSE.txt` and the License section with your project's approved license
-- [ ] Search this repo for "REPLACE-ME" and update all instances accordingly
-- [ ] Update `CONTRIBUTING.md` as needed
-- [ ] Review the workflows in `.github/workflows`, updating as needed. See https://docs.github.com/en/actions for information on what these files do and how they work.
-- [ ] Review and update the suggested Issue and PR templates as needed in `.github/ISSUE_TEMPLATE` and `.github/PULL_REQUEST_TEMPLATE`
+# Qualcomm Log Collector (QLC)
 
-# Project Name
+## Overview
+Qualcomm Log Collector (QLC) is a tool for collecting diagnostic logs from Qualcomm devices via the diag protocol. This project supports multiple platforms including Windows (ARM64 and x64) and Linux.
 
-*\<update with your project name and a short description\>*
+## Build Instructions for Windows
 
-Project that does ... implemented in ... runs on Qualcomm® *\<processor\>*
+### Windows One Time Setup
+1. Download Visual Studio Build Tools:
+   - Visit [https://aka.ms/vs/stable/vs_BuildTools.exe](https://aka.ms/vs/stable/vs_BuildTools.exe)
+   NOTE: Only Visual Studio Build Tools are required.
 
-## Branches
+2. Run the installer and select "Individual components"
 
-**main**: Primary development branch. Contributors should develop submissions based on this branch, and submit pull requests to this branch.
+3. Install required components based on your target architecture:
+   - For x64 builds, select:
+     - MSVC build tools for x64/x86 (latest)
+     - C++ CMake Tools for Windows
+     - Windows 11 SDK (10.0.22621.0)
+     - MSVC v142 - VS 2019 C++ x64/x86 build tools
 
-## Requirements
+   - For ARM64 builds, select:
+     - MSVC build tools for ARM64/ARM64EC (latest)
+     - C++ CMake Tools for Windows
+     - Windows 11 SDK (10.0.22621.0)
+     - MSVC v142 - VS 2019 C++ ARM64 build tools
 
-List requirements to run the project, how to install them, instructions to use docker container, etc...
+4. Verify installation:
+   ```cmd
+   cmake --version
+   ```
+   You should see the CMake version and the MSVC compiler information.
 
-## Installation Instructions
+   If CMake is not found, ensure you've added it to your system PATH. You can add it by:
+   1. Open System Properties (Win + Pause/Break)
+   2. Click "Advanced system settings"
+   3. Click "Environment Variables"
+   4. Under "System variables", find and select "Path"
+   5. Click "Edit"
+   6. Click "New"
+   7. Add the CMake bin directory path
+   8. Click "OK" to save
+   9. Restart any open command prompts for the changes to take effect
 
-How to install the software itself.
+#### Building on Windows (x64/ARM64)
+1. Open a Command Prompt
+2. Navigate to the project directory:
+   ```cmd
+   cd path\to\project
+   ```
+3. Create and navigate to a build directory:
+   ```cmd
+   mkdir build
+   cd build
+   ```
+4. Configure with CMake:
+   - For x64:
+     ```cmd
+     cmake .. -A x64
+     ```
+   - For ARM64:
+     ```cmd
+     cmake .. -A ARM64
+     ```
+5. Build the project:
+   ```cmd
+   cmake --build . --config Release
+   ```
 
-## Usage
+### Build Output ###
 
-Describe how to use the project.
+#### Windows (x64)
 
-## Development
+`Build/Windows/x64/Release/bin/`
 
-How to develop new features/fixes for the software. Maybe different than "usage". Also provide details on how to contribute via a [CONTRIBUTING.md file](CONTRIBUTING.md).
+#### Windows (ARM64)
+
+`Build/Windows/ARM64/Release/bin/`
+
+
+## Build Instructions for Linux
+
+### Linux One Time Setup
+1. Install required development packages:
+   ```bash
+   sudo apt update
+   sudo apt install \
+     cmake \
+     libusb-1.0-0-dev \
+     libudev-dev \
+     pkg-config \
+     build-essential
+   ```
+
+2. Verify installation:
+   ```bash
+   cmake --version
+   gcc --version
+   ```
+
+### Building on Linux
+1. Navigate to the project directory:
+   ```bash
+   cd path/to/project
+   ```
+2. Create and navigate to a build directory:
+   ```bash
+   mkdir build
+   cd build
+   ```
+3. Configure and build:
+   ```bash
+   cmake .. -DCMAKE_BUILD_TYPE=Release
+   cmake --build .
+   ```
+
+### Build Output
+
+`Build/Linux/x86_64/Release/bin/`
+
+## Project Structure
+```
+.
+├── CMakeLists.txt          # Main CMake configuration file
+├── src/                    # Source code directory
+│   ├── diag/              # Diag protocol commands and parsing
+│   ├── hdlc/              # HDLC framing and encoding
+│   ├── logger/            # Diag logger implementation
+│   ├── ptrace/            # Ptrace writer for log output
+│   ├── qlc/               # CLI interface and QLC writer
+│   ├── transport/         # Device transport layer
+│   ├── external/          # External dependencies
+│   │   └── kLogger/       # Logging library
+│   └── qds/              # Qualcomm Device Service
+│       ├── common/        # Common utilities
+│       ├── libusb/        # USB library interface
+│       ├── qds_lnx/       # Linux-specific implementations
+│       └── qds_win/       # Windows-specific implementations
+├── tests/                  # Unit tests
+├── doc/                    # Documentation
+└── Build/                  # Build output directory
+```
+
+## Troubleshooting
+
+### Common Issues
+
+#### Windows
+1. "CMake not found"
+   - Ensure CMake is installed and added to PATH
+   - Restart the Command Prompt
+
+2. "MSVC compiler not found"
+   - Verify Visual Studio Build Tools installation
+
+3. Missing Windows SDK
+   - Rerun the Visual Studio installer
+   - Select and install the Windows 11 SDK (10.0.22621.0)
+
+#### Linux
+1. Missing development packages
+   - Ensure all required packages are installed (see Linux One Time Setup section)
+   - If you see errors about missing libraries, install the missing package
+
+2. Build errors related to C++17
+   - Ensure your compiler supports C++17
+   - On older systems, you may need to install or upgrade GCC/G++
+
 
 ## Getting in Contact
 
-How to contact maintainers. E.g. GitHub Issues, GitHub Discussions could be indicated for many cases. However a mail list or list of Maintainer e-mails could be shared for other types of discussions. E.g.
-
 * [Report an Issue on GitHub](../../issues)
 * [Open a Discussion on GitHub](../../discussions)
-* [E-mail us](mailto:REPLACE-ME@qti.qualcomm.com) for general questions
 
 ## License
-
-*\<update with your project name and license\>*
-
-*\<REPLACE-ME\>* is licensed under the [BSD-3-clause License](https://spdx.org/licenses/BSD-3-Clause.html). See [LICENSE.txt](LICENSE.txt) for the full license text.
+Qualcomm Log Collector is licensed under the [BSD-3-clause License](https://spdx.org/licenses/BSD-3-Clause.html). See [LICENSE.txt](LICENSE.txt) for the full license text.

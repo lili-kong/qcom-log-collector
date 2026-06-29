@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: Apache-2.0
-// Copyright 2024 Qualcomm Innovation Center, Inc.
+// Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+// SPDX-License-Identifier: BSD 3-Clause Clear License
 //
 // CFG file parser for Qualcomm diagnostic logging configuration.
 // Parses .cfg (HDLC-framed) and .cfg2 (Non-HDLC-framed) command streams,

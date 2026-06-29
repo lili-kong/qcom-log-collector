@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: Apache-2.0
-// Copyright 2024 Qualcomm Innovation Center, Inc.
+// Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+// SPDX-License-Identifier: BSD 3-Clause Clear License
 //
 // ADPL-specific diag subsystem command builders and packet decoder.
 // All configuration commands are sent over the existing diag serial connection.

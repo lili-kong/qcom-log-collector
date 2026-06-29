@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: Apache-2.0
-// Copyright 2024 Qualcomm Innovation Center, Inc.
+// Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+// SPDX-License-Identifier: BSD 3-Clause Clear License
 //
 // Generic diag subsystem command builder.
 // Both QDSS and ADPL configuration use subsystem commands (cmd_id=0x4B)

@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: Apache-2.0
-// Copyright 2024 Qualcomm Innovation Center, Inc.
+// Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+// SPDX-License-Identifier: BSD 3-Clause Clear License
 //
 // CRC-16-CCITT lookup table and computation for HDLC framing.
 // Polynomial: x^16 + x^12 + x^5 + 1 (0x8408 reflected)

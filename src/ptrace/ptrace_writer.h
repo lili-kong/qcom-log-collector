@@ -1,9 +1,8 @@
 // Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 // SPDX-License-Identifier: BSD 3-Clause Clear License
 //
-// Ptrace file writer — QUTS text CSV format.
+// Ptrace file writer — CSV format.
 //
-// Format compatible with Diag::PortTraceReader (PORT_TRACE_QUTS):
 //   Line 1: metadata header — pid,appName,appVersion,hostname,osFamily
 //   Line 2: metadata values — <pid>,<appName>,<version>,<hostname>,<os>
 //   Line 3: blank
@@ -34,7 +33,7 @@ struct PtraceMetadata {
     std::string device_description;  // e.g. "USB handle 2020 : Qualcomm HS-USB Diagnostics 90DB (COM3)"
 };
 
-/// Writes raw diag data to a ptrace file in QUTS text CSV format.
+/// Writes raw diag data to a ptrace file in CSV format.
 class PtraceWriter {
 public:
     PtraceWriter() = default;

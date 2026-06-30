@@ -49,8 +49,8 @@ for later analysis.
 **To run the tool**
 - A Qualcomm device exposing a diag port over USB, with the appropriate USB
   drivers installed (see [USB drivers](#usb-drivers)).
-- The diag port must be **free** — no other diag tool (QXDM/QUTS/QCAT, etc.)
-  may hold it open at the same time.
+- The diag port must be **free** — no other diag tool may hold it open at
+  the same time.
 - A `.cfg` (or `.cfg2`) mask-configuration file describing what to log.
 
 **To build from source**
@@ -62,8 +62,8 @@ for later analysis.
 
 ## USB drivers
 
-Installing Qualcomm USB drivers is optional if the Qualcomm kernel drivers
-(QUD) are already present on your system. If drivers have not been installed,
+Installing Qualcomm USB drivers is optional if the Qualcomm kernel drivers 
+are already present on your system. If drivers have not been installed,
 it is recommended to install the open-source userspace drivers. Driver
 installation is a one-time process.
 
@@ -72,13 +72,13 @@ Two open-source driver options are available:
 | Driver | Repository | Notes |
 |--------|-----------|-------|
 | **Userspace driver** | [qcom-usb-userspace-drivers](https://github.com/qualcomm/qcom-usb-userspace-drivers/releases) | Lightweight, libusb-based. Has a known compatibility issue with ADB (see [Known limitations](#known-limitations)). |
-| **QUD (kernel driver)** | [qcom-usb-kernel-drivers](https://github.com/qualcomm/qcom-usb-kernel-drivers/releases) | Recommended if you also need ADB running alongside log collection. |
+| **Kernel driver** | [qcom-usb-kernel-drivers](https://github.com/qualcomm/qcom-usb-kernel-drivers/releases) | Recommended if you also need ADB running alongside log collection. |
 
 To install either driver, find the release matching your platform, expand the
 **Assets** section, and either run the installer executable directly or
 download the signed zip and run the executable inside it.
 
-Choose based on your ADB use case — if you need ADB concurrently, use QUD.
+Choose based on your ADB use case — if you need ADB concurrently, use the kernel driver.
 If ADB is not needed, either driver works.
 
 ---
@@ -222,7 +222,7 @@ Two formats are supported, selected by file extension:
 | `.cfg2` | Non-HDLC-framed | Length-prefixed framing. |
 
 CFG files are normally produced by Qualcomm mask-configuration tooling (e.g.
-QCAT/QXDM mask exports). A small example used by the test suite lives at
+QXDM mask exports). A small example used by the test suite lives at
 `tests/test_data/sample.cfg`.
 
 If the CFG file cannot be parsed (no valid frames found), the tool reports an
@@ -250,8 +250,7 @@ tools.
 
 Alongside the `.ptrace` file, the tool writes a `.qlc` binary metadata file
 containing device and session information gathered during the handshake. This
-file is used by downstream log-analysis tools (such as QUTS) to correctly
-decode the capture.
+file is used by downstream log-analysis tools to correctly decode the capture.
 
 The `.qlc` file includes:
 
@@ -334,7 +333,7 @@ File size:   6789322 bytes
   ```bash
   adb kill-server
   ```
-  If you need ADB running concurrently with log collection, use the QUD kernel
+  If you need ADB running concurrently with log collection, use the kernel
   driver instead (see [USB drivers](#usb-drivers)).
 
 ---
@@ -343,7 +342,7 @@ File size:   6789322 bytes
 
 **"Device did not respond to loopback."**
 The tool connected to the port but got no diag response. Common causes:
-- Another application (QUTS, QXDM, QCAT, …) has the COM/diag port open and is
+- Another application has the COM/diag port open and is
   consuming responses. Close all other diag tools and retry.
 - The chosen `--device` is not actually a Qualcomm diag port.
 - The device is in a mode that doesn't answer diag commands.

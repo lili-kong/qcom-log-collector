@@ -11,8 +11,6 @@ namespace diaglogger {
 // --- Command builders ---
 
 ByteBuffer build_security_key_request() {
-    // Exact bytes from QUTS Diag.cpp:376 — requestIPKeys()
-    // [0x4B][0x12][0x33][0x08][0x01][0x00][0x00][0x00]
     ByteBuffer payload = { 0x01, 0x00, 0x00, 0x00 };
     return build_subsystem_command(SubsysId::DIAG_SERV, HandshakeCmd::SECURITY_KEY_LIST, payload);
 }
@@ -141,7 +139,7 @@ NonHdlcSwitchResult parse_non_hdlc_switch_response(const ByteBuffer& payload) {
     NonHdlcSwitchResult result;
 
     // Expected: [1] framingVersion, [1] result (0=success)
-    // Confirmed from QUTS emulator: response bytes { 0x4B, 0x12, 0x18, 0x02, 0x01, 0x00 }
+    // Response bytes { 0x4B, 0x12, 0x18, 0x02, 0x01, 0x00 }
     // After extracting subsystem header (4 bytes), payload is: [0x01][0x00]
     if (payload.size() < 2) return result;
 

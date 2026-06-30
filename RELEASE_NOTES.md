@@ -33,5 +33,5 @@ diagnostic logs from Qualcomm devices over the Diag protocol.
 - **ADB compatibility:**
   - **Userspace driver** — there is a known compatibility issue with ADB. Users
     must kill the ADB server (`adb kill-server`) before running `qlc`.
-  - **QUD driver** — recommended if you also need ADB running alongside log
+  - **Kernel driver** — recommended if you also need ADB running alongside log
     collection. No known ADB compatibility issues.

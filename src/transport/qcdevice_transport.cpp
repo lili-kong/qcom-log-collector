@@ -107,8 +107,7 @@ bool QcDeviceTransport::open() {
             if (TransportManager::is_com_port_in_use(com_port)) {
                 CFLOG_WARNING("\n*** WARNING: " + com_port
                           + " is already open by another process! ***\n"
-                          "*** Close QUTS, Device Manager, or any other tool"
-                          " using this port. ***\n"
+                          "*** Close any other tool using this port. ***"
                           "*** While qualcomm-log-collector can open a shared handle,"
                           " responses will go to\n"
                           "*** the OTHER reader, causing loopback to fail."

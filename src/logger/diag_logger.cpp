@@ -49,8 +49,8 @@ bool DiagLogger::do_connection() {
     if (!do_loopback()) {
         CFLOG_ERROR("Error: Device did not respond to loopback.\n"
                   "  Possible causes:\n"
-                  "  1. Another application (QUTS, Diag Tool, etc.) has the COM port open\n"
-                  "     and is consuming responses. Close all other diag tools and retry.\n"
+                  "  1. Another application has the COM port open and is consuming\n"
+                  "     responses. Close all other diag tools and retry.\n"
                   "  2. The device is not a Qualcomm diag port.\n"
                   "  3. The device is in a mode that does not respond to diag commands.\n", true);
         return false;
@@ -502,8 +502,6 @@ bool DiagLogger::request_non_hdlc_switch() {
 }
 
 bool DiagLogger::do_handshake() {
-    // Follows QUTS connect() sequence (Diag.cpp:8526-8538).
-
     // 1. VERNO request (device version info for .qlc metadata, non-fatal)
     {
         ByteBuffer cmd = build_verno_request();

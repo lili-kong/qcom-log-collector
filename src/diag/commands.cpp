@@ -36,12 +36,10 @@ ByteBuffer build_loopback_request() {
 }
 
 ByteBuffer build_status_request() {
-    // STATUS command: single byte, matches QUTS doSimpleConnect()
     return { DiagCmd::STATUS };
 }
 
 ByteBuffer build_ext_build_id_request() {
-    // EXT_BUILD_ID command: single byte, matches QUTS MOBILE_ID_REQUEST[]
     return { DiagCmd::EXT_BUILD_ID };
 }
 

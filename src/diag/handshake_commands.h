@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: BSD 3-Clause Clear License
 //
 // Handshake subsystem command builders and response parsers.
-// Implements the QUTS connection handshake sequence: security keys,
+// Implements the connection handshake sequence: security keys,
 // feature query, DiagID/hypervisor setup.
 
 #ifndef DIAGLOGGER_HANDSHAKE_COMMANDS_H
@@ -31,7 +31,7 @@ namespace HandshakeCmd {
     // placeholder that can be updated when TABL headers are available.
     constexpr uint16_t FEATURE_QUERY             = 0x0225;  // placeholder
 
-    // Non-HDLC switch: confirmed from QUTS emulator (NON_HDLC_SWITCH_CMD = 0x0218124B)
+    // Non-HDLC switch
     constexpr uint16_t NON_HDLC_SWITCH           = 0x0218;  // 536
 
     // QShrink4 FILE_LIST per-peripheral subcmds (subsys=0x12)
@@ -203,7 +203,7 @@ struct QshrinkPeripheral {
 
 // --- Command builders ---
 
-/// Build security key request (exact bytes from QUTS Diag.cpp:376).
+/// Build security key request
 /// Subsys=0x12, subcmd=0x0833, payload=[0x01, 0x00, 0x00, 0x00].
 ByteBuffer build_security_key_request();
 

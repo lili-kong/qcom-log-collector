@@ -46,7 +46,6 @@ static int tests_failed = 0;
 // =====================================================================
 
 TEST(security_key_exact_bytes) {
-    // Must produce exact 8-byte sequence from QUTS Diag.cpp:376
     ByteBuffer pkt = build_security_key_request();
     ASSERT_EQ(pkt.size(), 8u);
     ASSERT_EQ(pkt[0], 0x4B);  // SUBSYS cmd

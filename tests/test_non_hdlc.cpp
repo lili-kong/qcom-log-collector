@@ -215,11 +215,10 @@ TEST(decode_incremental_feed) {
 }
 
 // =====================================================================
-// Non-HDLC decoder — QUTS test data validation
+// Non-HDLC decoder
 // =====================================================================
 
-TEST(decode_quts_test_data) {
-    // From QUTS Diag_UT.cpp NON_HDLC_BUFFER:
+TEST(decode_multi_frame_stream) {
     // Frame 1: 7E 01 84 00 [132 bytes payload] 7E
     // Frame 2: 7E 01 65 00 [101 bytes payload] 7E
     // Frame 3: 7E 01 3F 00 [ 63 bytes payload] 7E
@@ -265,8 +264,8 @@ TEST(decode_quts_test_data) {
     ASSERT_EQ(decoder.error_count(), 0u);
 }
 
-TEST(decode_quts_raw_frame_header) {
-    // Verify decoder handles the exact header bytes from QUTS test data:
+TEST(decode_raw_frame_header) {
+    // Verify decoder handles the exact header bytes:
     // 7E 01 84 00 = flag, version=1, len=0x0084=132
     NonHdlcDecoder decoder;
     ByteBuffer wire;
@@ -364,7 +363,7 @@ TEST(non_hdlc_switch_request_format) {
 }
 
 TEST(non_hdlc_switch_response_success) {
-    // Confirmed from QUTS emulator: after subsys header, payload is [0x01][0x00]
+    // After subsys header, payload is [0x01][0x00]
     ByteBuffer payload = { 0x01, 0x00 };  // version=1, result=0 (success)
     auto result = parse_non_hdlc_switch_response(payload);
     ASSERT_TRUE(result.valid);

@@ -1,4 +1,3 @@
-# SPDX-License-Identifier: Apache-2.0
 # qualcomm-log-collector unit tests
 
 # HDLC round-trip tests
@@ -51,7 +50,22 @@ add_executable(test_device_info test_device_info.cpp)
 target_link_libraries(test_device_info PRIVATE test_objects ${PLATFORM_LIBS})
 add_test(NAME device_info_tests COMMAND test_device_info)
 
+# Binary writer tests
+add_executable(test_binary_writer test_binary_writer.cpp)
+target_link_libraries(test_binary_writer PRIVATE test_objects ${PLATFORM_LIBS})
+add_test(NAME binary_writer_tests COMMAND test_binary_writer)
+
 # QLC metadata writer tests
 add_executable(test_qlc_writer test_qlc_writer.cpp)
 target_link_libraries(test_qlc_writer PRIVATE test_objects ${PLATFORM_LIBS})
 add_test(NAME qlc_writer_tests COMMAND test_qlc_writer)
+
+# Inflater tests
+add_executable(test_inflate test_inflate.cpp)
+target_link_libraries(test_inflate PRIVATE test_objects ${PLATFORM_LIBS})
+add_test(NAME inflate_tests COMMAND test_inflate)
+
+# QSR4 writer tests
+add_executable(test_qsr4_writer test_qsr4_writer.cpp)
+target_link_libraries(test_qsr4_writer PRIVATE test_objects ${PLATFORM_LIBS})
+add_test(NAME qsr4_writer_tests COMMAND test_qsr4_writer)

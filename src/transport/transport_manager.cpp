@@ -1,49 +1,198 @@
-// Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
-// SPDX-License-Identifier: BSD 3-Clause Clear License
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2024 Qualcomm Innovation Center, Inc.
 //
 // TransportManager implementation — device detection and monitor lifecycle.
+
+#include <algorithm>
+#include <chrono>
+#include <cstdio>
+#include <cstring>
+#include <thread>
+#include <unordered_map>
+#include <utility>
+#include <vector>
 
 #include "transport_manager.h"
 #include "qdpublic.h"
 #include "qcom-libusb.h"
 #include "KL/kLogger.h"
 
-#include <chrono>
-#include <cstdio>
-#include <cstring>
-#include <thread>
-#include <utility>
-#include <vector>
-
-// Device-change callback that stores sub-interface DevDesc strings pushed
-// by PushLibUSBToApplication (libusb sub-interface enumeration).
-// On Windows, MakeAnnouncement requires a non-NULL callback; on Linux,
-// this captures per-interface device names from the libusb enumeration path.
-static std::vector<diaglogger::DeviceInfo>* g_libusb_devices = nullptr;
-static std::mutex g_libusb_devices_mutex;
+// All protocols discovered by the device monitor callback (both platforms).
+static std::vector<QC::DeviceInfo> g_monitor_devices;
+static std::mutex g_monitor_devices_mutex;
 
 #ifdef TOOLS_TARGET_WINDOWS
-static VOID __stdcall device_change_callback(PCB_PARAMS pCbParams, PVOID* /*context*/)
-#else
-static VOID device_change_callback(PCB_PARAMS pCbParams, PVOID* /*context*/)
+static std::string from_wide(const wchar_t* ws) {
+    if (!ws || !ws[0]) {
+        return {};
+    }
+    int len = WideCharToMultiByte(CP_UTF8, 0, ws, -1, nullptr, 0, nullptr, nullptr);
+    if (len <= 0) {
+        return {};
+    }
+    std::string out(static_cast<size_t>(len - 1), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, ws, -1, &out[0], len, nullptr, nullptr);
+    return out;
+}
 #endif
-{
-#ifdef TOOLS_TARGET_LINUX
-    if (!pCbParams || !pCbParams->DevDesc)
-        return;
 
-    std::lock_guard<std::mutex> lock(g_libusb_devices_mutex);
-    if (g_libusb_devices) {
-        diaglogger::DeviceInfo info;
-        info.device_name = pCbParams->DevDesc;
-        g_libusb_devices->push_back(std::move(info));
+// Map QDS DEV_PROTOCOL_* wire code to application-level ProtocolType.
+static QC::ProtocolType map_wire_protocol(uint32_t wire_code) {
+    switch (wire_code & QC_FLAG_MASK_DEV_PROTOCOL) {
+        case DEV_PROTOCOL_DIAG:     return QC::PROT_DIAG;
+        case DEV_PROTOCOL_SAHARA:   return QC::PROT_SAHARA;
+        case DEV_PROTOCOL_FIREHOSE: return QC::PROT_FIREHOSE;
+        case DEV_PROTOCOL_ADPL:     return QC::PROT_ADPL;
+        case DEV_PROTOCOL_QDSS:     return QC::PROT_QDSS;
+        case DEV_PROTOCOL_DUN:      return QC::PROT_DUN;
+        case DEV_PROTOCOL_RMNET:    return QC::PROT_RMNET;
+        case DEV_PROTOCOL_NMEA:     return QC::PROT_NMEA;
+        default:                    return QC::PROT_UNKNOWN;
+    }
+}
+
+// Resolve protocol from description when QDS reports UNKNOWN or RESERVED.
+// Only resolves unambiguous cases (ADPL, QDSS, MHI DIAG).
+// The ambiguous "Diagnostics"/"DIAG" case (could be DIAG or SAHARA) is deferred
+// to enumerate_composite_devices() where sibling count is known.
+static QC::ProtocolType resolve_protocol(uint32_t wire_code,
+                                                 const std::string& desc,
+                                                 const std::string& parent_desc) {
+    QC::ProtocolType mapped = map_wire_protocol(wire_code);
+    if (mapped != QC::PROT_UNKNOWN) {
+        return mapped;
+    }
+
+    // MHI device with QCDM in description → always DIAG (unambiguous)
+    if ((desc.find("QCDM") != std::string::npos || desc.find("qcdm") != std::string::npos)
+        && (parent_desc.find("mhi") != std::string::npos || parent_desc.find("MHI") != std::string::npos)) {
+        return QC::PROT_DIAG;
+    }
+
+    // Description contains "DPL" → ADPL (unambiguous)
+    if (desc.find("DPL") != std::string::npos) {
+        return QC::PROT_ADPL;
+    }
+
+    // Description contains "QDSS" → QDSS (unambiguous)
+    if (desc.find("QDSS") != std::string::npos) {
+        return QC::PROT_QDSS;
+    }
+
+    // "Diagnostics"/"DIAG" is NOT resolved here — depends on sibling count.
+    return QC::PROT_UNKNOWN;
+}
+
+#ifdef TOOLS_TARGET_WINDOWS
+static VOID __stdcall device_change_callback(PCB_PARAMS pCbParams, PVOID* /*context*/) {
+#else
+static VOID device_change_callback(PCB_PARAMS pCbParams, PVOID* /*context*/) {
+#endif
+    if (!pCbParams) {
+        return;
+    }
+
+#ifdef TOOLS_TARGET_WINDOWS
+    if (!pCbParams->DevDesc) {
+        return;
+    }
+
+    UCHAR devState = static_cast<UCHAR>((pCbParams->Flag & 0x00F0) >> 4);
+
+    QC::DeviceInfo info;
+    info.device_name = from_wide(pCbParams->DevDesc);
+    info.com_port = QC::TransportManager::extract_com_port(info.device_name);
+    info.parent_device = from_wide(pCbParams->ParentDev);
+    info.parent_location = from_wide(pCbParams->ParentLocationInfomation);
+    info.adb_serial_number = from_wide(pCbParams->SerNum);
+    info.msm_serial_number = from_wide(pCbParams->SerNumMsm);
+    info.protocol = resolve_protocol(pCbParams->Protocol, info.device_name, info.parent_device);
+    info.flags = pCbParams->Flag;
+
+    if (devState == 1) { // QC_DEV_STATE_ARRIVAL
+        std::lock_guard<std::mutex> lock(g_monitor_devices_mutex);
+        if (!info.parent_device.empty()) {
+            bool has_siblings = false;
+            for (auto& existing : g_monitor_devices) {
+                if (existing.parent_device != info.parent_device
+                    || existing.parent_location != info.parent_location) {
+                    continue;
+                }
+                has_siblings = true;
+                if (existing.protocol == QC::PROT_UNKNOWN
+                    && (existing.device_name.find("Diagnostics") != std::string::npos
+                        || existing.device_name.find("DIAG") != std::string::npos)) {
+                    existing.protocol = QC::PROT_DIAG;
+                }
+            }
+            if (has_siblings && info.protocol == QC::PROT_UNKNOWN
+                && (info.device_name.find("Diagnostics") != std::string::npos
+                    || info.device_name.find("DIAG") != std::string::npos)) {
+                info.protocol = QC::PROT_DIAG;
+            }
+        }
+        g_monitor_devices.push_back(std::move(info));
+    } else if (devState == 2) { // QC_DEV_STATE_DEPARTURE
+        std::lock_guard<std::mutex> lock(g_monitor_devices_mutex);
+        auto it = std::remove_if(g_monitor_devices.begin(), g_monitor_devices.end(),
+            [&](const QC::DeviceInfo& d) {
+                return d.device_name == info.device_name;
+            });
+        g_monitor_devices.erase(it, g_monitor_devices.end());
     }
 #else
-    (void)pCbParams;
+    if (!pCbParams->DevDesc) {
+        return;
+    }
+
+    UCHAR devState = static_cast<UCHAR>((pCbParams->Flag & 0x00F0) >> 4);
+
+    QC::DeviceInfo info;
+    info.device_name = pCbParams->DevDesc;
+    info.com_port = QC::TransportManager::extract_com_port(info.device_name);
+    info.parent_device = pCbParams->ParentDev ? pCbParams->ParentDev : "";
+    info.parent_location = pCbParams->ParentLocationInfomation ? pCbParams->ParentLocationInfomation : "";
+    info.adb_serial_number = pCbParams->SerNum ? pCbParams->SerNum : "";
+    info.msm_serial_number = pCbParams->SerNumMsm ? pCbParams->SerNumMsm : "";
+    info.protocol = resolve_protocol(pCbParams->Protocol, info.device_name, info.parent_device);
+    info.flags = pCbParams->Flag;
+
+    if (devState == 1) { // QC_DEV_STATE_ARRIVAL
+        std::lock_guard<std::mutex> lock(g_monitor_devices_mutex);
+        if (!info.parent_device.empty()) {
+            bool has_siblings = false;
+            for (auto& existing : g_monitor_devices) {
+                if (existing.parent_device != info.parent_device
+                    || existing.parent_location != info.parent_location) {
+                    continue;
+                }
+                has_siblings = true;
+                if (existing.protocol == QC::PROT_UNKNOWN
+                    && (existing.device_name.find("Diagnostics") != std::string::npos
+                        || existing.device_name.find("DIAG") != std::string::npos)) {
+                    existing.protocol = QC::PROT_DIAG;
+                }
+            }
+            if (has_siblings && info.protocol == QC::PROT_UNKNOWN
+                && (info.device_name.find("Diagnostics") != std::string::npos
+                    || info.device_name.find("DIAG") != std::string::npos)) {
+                info.protocol = QC::PROT_DIAG;
+            }
+        }
+        g_monitor_devices.push_back(info);
+    } else if (devState == 2) { // QC_DEV_STATE_DEPARTURE
+        std::lock_guard<std::mutex> lock(g_monitor_devices_mutex);
+        auto it = std::remove_if(g_monitor_devices.begin(), g_monitor_devices.end(),
+            [&](const QC::DeviceInfo& d) {
+                return d.device_name == info.device_name;
+            });
+        g_monitor_devices.erase(it, g_monitor_devices.end());
+    }
+
 #endif
 }
 
-namespace diaglogger {
+namespace QC {
 
 TransportManager& TransportManager::instance() {
     static TransportManager mgr;
@@ -52,7 +201,9 @@ TransportManager& TransportManager::instance() {
 
 #ifdef TOOLS_TARGET_WINDOWS
 std::wstring TransportManager::to_wide(const std::string& s) {
-    if (s.empty()) return {};
+    if (s.empty()) {
+        return {};
+    }
     int sz = MultiByteToWideChar(CP_ACP, 0, s.data(),
                                  static_cast<int>(s.size()), nullptr, 0);
     std::wstring out(static_cast<size_t>(sz), L'\0');
@@ -68,38 +219,35 @@ std::wstring TransportManager::to_wide(const std::string& s) {
 /// Prints QC Device Discovery logs to QLC Debug log files
 // ----------------------------------------------------------------------------
 #ifdef TOOLS_TARGET_WINDOWS
-   static void __stdcall logQDS(int32_t level, PCHAR pMessage)
+static void __stdcall logQDS(int32_t level, PCHAR pMessage) {
 #else
-   static void logQDS(int32_t level, PCHAR pMessage)
+static void logQDS(int32_t level, PCHAR pMessage) {
 #endif
-   {
-      if(pMessage)
-      {
-         switch(KL::Level(level))
-         {
+    if (pMessage) {
+        switch (KL::Level(level)) {
             case KL::Level::Data:
-               FLOG_INFO(("QDS: " + std::string(pMessage)).c_str());
-               break;
+                FLOG_INFO(("QDS: " + std::string(pMessage)).c_str());
+                break;
 
             case KL::Level::Debug:
-               FLOG_DEBUG(("QDS: " + std::string(pMessage)).c_str());
-               break;
+                FLOG_DEBUG(("QDS: " + std::string(pMessage)).c_str());
+                break;
 
             case KL::Level::Warn:
-               FLOG_WARNING(("QDS: " + std::string(pMessage)).c_str());
-               break;
+                FLOG_WARNING(("QDS: " + std::string(pMessage)).c_str());
+                break;
 
             case KL::Level::Error:
-               FLOG_ERROR(("QDS: " + std::string(pMessage)).c_str());
-               break;
+                FLOG_ERROR(("QDS: " + std::string(pMessage)).c_str());
+                break;
 
             case KL::Level::Info:
             default:
-               FLOG_INFO(("QDS: " + std::string(pMessage)).c_str());
-               break;
-         }
-      }
-   }
+                FLOG_INFO(("QDS: " + std::string(pMessage)).c_str());
+                break;
+        }
+    }
+}
 
 void TransportManager::configure_features() {
     // SetFeature MUST run on every platform: QDS's Linux processAddDevice
@@ -162,6 +310,11 @@ void TransportManager::stop_monitor() {
         //CFLOG_INFO("TransportManager: StopDeviceMonitor completed (libusb routing reset)");
     } catch (...) {
         CFLOG_WARNING("TransportManager: StopDeviceMonitor threw (non-fatal)", true);
+    }
+
+    {
+        std::lock_guard<std::mutex> lock2(g_monitor_devices_mutex);
+        g_monitor_devices.clear();
     }
 
     monitor_running_ = false;
@@ -249,13 +402,17 @@ std::string TransportManager::extract_com_port(const std::string& desc) {
                 break;
             }
         }
-        if (all_digits) return desc;
+        if (all_digits) {
+            return desc;
+        }
     }
     return {};
 }
 
 bool TransportManager::is_com_port_in_use(const std::string& com_port) {
-    if (com_port.empty()) return false;
+    if (com_port.empty()) {
+        return false;
+    }
 
 #ifdef TOOLS_TARGET_WINDOWS
     std::string path = "\\\\.\\" + com_port;
@@ -283,65 +440,90 @@ bool TransportManager::is_com_port_in_use(const std::string& com_port) {
 #endif
 }
 
-std::vector<DeviceInfo> TransportManager::enumerate_interfaces() {
-    std::vector<DeviceInfo> result;
+std::vector<CompositeDevice> TransportManager::enumerate_composite_devices(
+    const std::vector<ProtocolType>& filter) {
+    std::vector<DeviceInfo> all_protocols;
+    {
+        std::lock_guard<std::mutex> lock(g_monitor_devices_mutex);
+        all_protocols = g_monitor_devices;
+    }
 
-#ifdef TOOLS_TARGET_LINUX
-    if (IsQcomLibusbEnable() && is_libusb_loaded()) {
-        std::vector<DeviceInfo> libusb_devs;
-        {
-            std::lock_guard<std::mutex> lock(g_libusb_devices_mutex);
-            g_libusb_devices = &libusb_devs;
+    // Group protocols by parent_device + parent_location.
+    // Use concatenation as the grouping key (like QUTS uses parentDescription).
+    std::unordered_map<std::string, CompositeDevice> groups;
+    std::vector<std::string> group_order;
+
+    // First pass: group ALL protocols by parent device
+    for (auto& proto : all_protocols) {
+        std::string key;
+        if (!proto.parent_device.empty()) {
+            key = proto.parent_device + "|" + proto.parent_location;
+        } else {
+            key = proto.device_name;
         }
 
-        ::enumerate_devices();
-
-        {
-            std::lock_guard<std::mutex> lock(g_libusb_devices_mutex);
-            g_libusb_devices = nullptr;
+        if (groups.find(key) == groups.end()) {
+            CompositeDevice dev;
+            dev.description = proto.parent_device.empty()
+                ? proto.device_name : proto.parent_device;
+            dev.location = proto.parent_location;
+            dev.adb_serial_number = proto.adb_serial_number;
+            dev.msm_serial_number = proto.msm_serial_number;
+            groups[key] = std::move(dev);
+            group_order.push_back(key);
+        } else {
+            auto& dev = groups[key];
+            if (dev.adb_serial_number.empty() && !proto.adb_serial_number.empty()) {
+                dev.adb_serial_number = proto.adb_serial_number;
+            }
+            if (dev.msm_serial_number.empty() && !proto.msm_serial_number.empty()) {
+                dev.msm_serial_number = proto.msm_serial_number;
+            }
         }
+        groups[key].protocols.push_back(std::move(proto));
+    }
 
-        if (!libusb_devs.empty()) {
-            // Collect bus-addr pairs to identify parent composite devices
-            std::vector<std::pair<int,int>> bus_addrs;
-            for (const auto& iface : libusb_devs) {
-                auto last_us = iface.device_name.rfind('_');
-                if (last_us == std::string::npos) continue;
-                auto dash = iface.device_name.find('-', last_us);
-                auto colon = iface.device_name.find(':', last_us);
-                if (dash == std::string::npos || colon == std::string::npos) continue;
-                int bus = std::stoi(iface.device_name.substr(last_us + 1, dash - last_us - 1));
-                int addr = std::stoi(iface.device_name.substr(dash + 1, colon - dash - 1));
-                bus_addrs.emplace_back(bus, addr);
+    // Second pass: resolve ambiguous "Diagnostics"/"DIAG" protocol.
+    // If protocol is UNKNOWN and description contains "Diagnostics" or "DIAG":
+    //   - Device has other sibling protocols → DIAG (normal operation)
+    //   - Device has NO other protocols → SAHARA (crash/ramdump mode, not usable)
+    for (auto& [key, dev] : groups) {
+        size_t total_protocols = dev.protocols.size();
+        for (auto& proto : dev.protocols) {
+            if (proto.protocol != PROT_UNKNOWN) {
+                continue;
+            }
+            if (proto.device_name.find("Diagnostics") == std::string::npos
+                && proto.device_name.find("DIAG") == std::string::npos) {
+                continue;
             }
 
-            result = std::move(libusb_devs);
-
-            // Append single-interface devices from GetDeviceList, skipping parents
-            auto all_devs = enumerate_devices();
-            for (const auto& dev : all_devs) {
-                bool is_parent = false;
-                for (const auto& [bus, addr] : bus_addrs) {
-                    char pattern[16];
-                    snprintf(pattern, sizeof(pattern), "%03d/%03d", bus, addr);
-                    if (dev.device_name.find(pattern) != std::string::npos) {
-                        is_parent = true;
-                        break;
-                    }
-                }
-                if (!is_parent) {
-                    result.push_back(dev);
-                }
+            if (total_protocols > 1) {
+                proto.protocol = PROT_DIAG;
             }
-            return result;
         }
     }
-#endif
 
-    // Fallback: return GetDeviceList results as-is
-    result = enumerate_devices();
+    // Third pass: filter by requested protocol types and remove empty devices
+    if (!filter.empty()) {
+        for (auto& [key, dev] : groups) {
+            std::vector<DeviceInfo> filtered;
+            for (auto& proto : dev.protocols) {
+                if (std::find(filter.begin(), filter.end(), proto.protocol) != filter.end()) {
+                    filtered.push_back(std::move(proto));
+                }
+            }
+            dev.protocols = std::move(filtered);
+        }
+    }
 
+    std::vector<CompositeDevice> result;
+    for (const auto& key : group_order) {
+        if (!groups[key].protocols.empty()) {
+            result.push_back(std::move(groups[key]));
+        }
+    }
     return result;
 }
 
-} // namespace diaglogger
+} // namespace QC

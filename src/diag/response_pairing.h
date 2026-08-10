@@ -3,12 +3,12 @@
 //
 // Request/response signature pairing for the diag RX dispatcher.
 
-#ifndef DIAGLOGGER_RESPONSE_PAIRING_H
-#define DIAGLOGGER_RESPONSE_PAIRING_H
+#ifndef QC_RESPONSE_PAIRING_H
+#define QC_RESPONSE_PAIRING_H
 
 #include "diaglogger/types.h"
 
-namespace diaglogger {
+namespace QC {
 
 // Command bytes whose responses echo a 4-byte header (cmd + subsys + 2-byte subcmd).
 namespace PairingCmd {
@@ -49,6 +49,6 @@ bool error_response_matches_signature(const ByteBuffer& signature, const ByteBuf
 // otherwise = valid response.
 bool is_error_response(const ByteBuffer& frame);
 
-} // namespace diaglogger
+} // namespace QC
 
-#endif // DIAGLOGGER_RESPONSE_PAIRING_H
+#endif // QC_RESPONSE_PAIRING_H

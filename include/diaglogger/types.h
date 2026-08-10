@@ -1,15 +1,15 @@
-// SPDX-License-Identifier: Apache-2.0
-// Copyright 2024 Qualcomm Innovation Center, Inc.
+// Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+// SPDX-License-Identifier: BSD 3-Clause Clear License
 
-#ifndef DIAGLOGGER_TYPES_H
-#define DIAGLOGGER_TYPES_H
+#ifndef QC_TYPES_H
+#define QC_TYPES_H
 
 #include <cstdint>
 #include <cstddef>
 #include <vector>
 #include <string>
 
-namespace diaglogger {
+namespace QC {
 
 using ByteBuffer = std::vector<uint8_t>;
 
@@ -22,13 +22,19 @@ enum class TransportState { CLOSED, CONNECTED, DISCONNECTED };
 
 // Platform detection
 #if defined(_WIN32) || defined(_WIN64)
-    #define TOOLS_TARGET_WINDOWS 1
+    #ifndef TOOLS_TARGET_WINDOWS
+        #define TOOLS_TARGET_WINDOWS
+    #endif
 #elif defined(__linux__)
-    #define TOOLS_TARGET_LINUX 1
+    #ifndef TOOLS_TARGET_LINUX
+        #define TOOLS_TARGET_LINUX
+    #endif
 #elif defined(__APPLE__)
-    #define TOOLS_TARGET_OSX 1
+    #ifndef TOOLS_TARGET_OSX
+        #define TOOLS_TARGET_OSX
+    #endif
 #endif
 
-} // namespace diaglogger
+} // namespace QC
 
-#endif // DIAGLOGGER_TYPES_H
+#endif // QC_TYPES_H

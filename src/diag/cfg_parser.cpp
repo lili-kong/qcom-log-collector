@@ -5,18 +5,20 @@
 // Parses .cfg (HDLC-framed) and .cfg2 (Non-HDLC-framed) command streams,
 // returning decoded command payloads ready to send to the device.
 
-#include "cfg_parser.h"
-#include "hdlc/hdlc.h"
-#include "hdlc/non_hdlc.h"
 #include <fstream>
 #include <stdexcept>
 #include <KL/Macros.h>
+#include "cfg_parser.h"
+#include "hdlc/hdlc.h"
+#include "hdlc/non_hdlc.h"
 
-namespace diaglogger {
+namespace QC {
 
 // Check if path has a given extension (case-insensitive).
 static bool has_extension(const std::string& path, const std::string& ext) {
-    if (path.size() < ext.size()) return false;
+    if (path.size() < ext.size()) {
+        return false;
+    }
     std::string suffix = path.substr(path.size() - ext.size());
     for (auto& c : suffix) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     return suffix == ext;
@@ -46,8 +48,12 @@ static std::vector<ByteBuffer> parse_cfg_stream(const ByteBuffer& data, const st
 
 CfgVersion detect_cfg_version(const ByteBuffer& /*data*/, const std::string& path) {
     if (!path.empty()) {
-        if (has_extension(path, ".cfg2")) return CfgVersion::NonHdlc;
-        if (has_extension(path, ".cfg"))  return CfgVersion::Hdlc;
+        if (has_extension(path, ".cfg2")) {
+            return CfgVersion::NonHdlc;
+        }
+        if (has_extension(path, ".cfg")) {
+            return CfgVersion::Hdlc;
+        }
     }
     return CfgVersion::Unknown;
 }
@@ -83,4 +89,4 @@ std::vector<ByteBuffer> parse_cfg_file(const std::string& path) {
     }
 }
 
-} // namespace diaglogger
+} // namespace QC

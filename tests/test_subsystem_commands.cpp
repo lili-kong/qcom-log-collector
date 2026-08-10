@@ -3,11 +3,12 @@
 //
 // Unit tests for generic subsystem command builder.
 
-#include "diag/subsystem_commands.h"
 #include <cassert>
 #include <cstdio>
 
-using namespace diaglogger;
+#include "diag/subsystem_commands.h"
+
+using namespace QC;
 
 static int tests_passed = 0;
 static int tests_failed = 0;

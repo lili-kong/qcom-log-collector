@@ -1,4 +1,3 @@
-# SPDX-License-Identifier: Apache-2.0
 # qualcomm-log-collector - Open-source Qualcomm diag protocol logging tool
 
 cmake_minimum_required(VERSION 3.14)
@@ -101,12 +100,15 @@ set(TRANSPORT_SOURCES
     src/transport/transport_factory.cpp
 )
 
-set(PTRACE_SOURCES
-    src/ptrace/ptrace_writer.cpp
+set(FILE_WRITER_SOURCES
+    src/file_writer/ptrace_writer.cpp
+    src/file_writer/binary_writer.cpp
+    src/file_writer/qlc_writer.cpp
+    src/file_writer/qsr4_writer.cpp
 )
 
+
 set(QLC_SOURCES
-    src/qlc/qlc_writer.cpp
     src/qlc/cli_argument_definitions.cpp
     src/qlc/cli_parser.cpp
     src/qlc/cli_help.cpp
@@ -114,6 +116,13 @@ set(QLC_SOURCES
 
 set(LOGGER_SOURCES
     src/logger/diag_logger.cpp
+    src/logger/qdss/qdss.cpp
+    src/logger/qdss/qdss_diag_manager.cpp
+    src/logger/adpl/adpl.cpp
+)
+
+set(EXTERNAL_SOURCES
+    src/external/inflate/inflate.cpp
 )
 
 # --- All project sources (excluding main.cpp) ---
@@ -121,9 +130,10 @@ set(ALL_SOURCES
     ${HDLC_SOURCES}
     ${DIAG_SOURCES}
     ${TRANSPORT_SOURCES}
-    ${PTRACE_SOURCES}
+    ${FILE_WRITER_SOURCES}
     ${QLC_SOURCES}
     ${LOGGER_SOURCES}
+    ${EXTERNAL_SOURCES}
     ${QDS_SOURCES}
 )
 
@@ -132,6 +142,7 @@ set(PROJECT_INCLUDE_DIRS
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${CMAKE_CURRENT_SOURCE_DIR}/src/external/kLogger/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/external/inflate
     ${KLOGGER_DIR}/include
 )
 

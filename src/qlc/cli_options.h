@@ -3,12 +3,13 @@
 //
 // CLI parsed options data structure.
 
-#ifndef DIAGLOGGER_CLI_OPTIONS_H
-#define DIAGLOGGER_CLI_OPTIONS_H
+#ifndef QC_CLI_OPTIONS_H
+#define QC_CLI_OPTIONS_H
 
+#include <cstdint>
 #include <string>
 
-namespace diaglogger {
+namespace QC {
 
 enum class CommandType {
     NONE,
@@ -23,7 +24,10 @@ struct CliOptions {
 
     // collect-log options
     std::string cfg_path;
+    std::string device_name;
     std::string port_name;
+    std::string qdss_port_name;
+    std::string adpl_port_name;
     std::string output_path;
     uint32_t baud_rate = 115200;
     int duration_seconds = 0;
@@ -31,6 +35,8 @@ struct CliOptions {
     bool hdlc_only = false;
     bool enable_recovery = true;
     int recovery_timeout_seconds = 120;
+    bool enable_qdss = false;
+    bool enable_adpl = false;
 
     bool has_cfg = false;
     bool has_port = false;
@@ -38,6 +44,6 @@ struct CliOptions {
     bool has_duration = false;
 };
 
-} // namespace diaglogger
+} // namespace QC
 
-#endif // DIAGLOGGER_CLI_OPTIONS_H
+#endif // QC_CLI_OPTIONS_H

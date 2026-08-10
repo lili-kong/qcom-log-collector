@@ -3,12 +3,13 @@
 //
 // Unit tests for QDSS command builders and response parsers.
 
-#include "diag/qdss_commands.h"
-#include "diag/subsystem_commands.h"
 #include <cassert>
 #include <cstdio>
 
-using namespace diaglogger;
+#include "diag/qdss_commands.h"
+#include "diag/subsystem_commands.h"
+
+using namespace QC;
 
 static int tests_passed = 0;
 static int tests_failed = 0;
@@ -35,40 +36,57 @@ static int tests_failed = 0;
 
 TEST(hw_accel_query) {
     auto pkt = build_qdss_hw_accel_query();
-    // Header: 0x4B, 0x12, 0x24, 0x02 (cmd=548=0x0224)
-    // Payload: QUERY(2), ALL(0)
-    CHECK(pkt.size() == 6);
+    // Header(4) + [version, operation, reserved(2), hw_type, hw_accel_version, diagid_mask(4)] = 14 bytes
+    CHECK(pkt.size() == 14);
     CHECK(pkt[0] == 0x4B);
     CHECK(pkt[1] == 0x12);
     CHECK(pkt[2] == 0x24);
     CHECK(pkt[3] == 0x02);
-    CHECK(pkt[4] == QdssHwAccelOp::QUERY);   // 2
-    CHECK(pkt[5] == QdssHwAccelType::ALL);    // 0
+    CHECK(pkt[4] == 2);                      // cmd_version (dynamic AtID default)
+    CHECK(pkt[5] == QdssHwAccelOp::QUERY);   // 2
+    CHECK(pkt[6] == 0);                      // reserved [1/2]
+    CHECK(pkt[7] == 0);                      // reserved [2/2]
+    CHECK(pkt[8] == QdssHwAccelType::ALL);   // hw_type = 0
+    CHECK(pkt[9] == 0);                      // hw_accel_version
+    CHECK(pkt[10] == 0);                     // diagid_mask = 0 (unused for QUERY)
     PASS("hw_accel_query");
 }
 
 TEST(hw_accel_enable) {
     auto pkt = build_qdss_hw_accel_enable(QdssHwAccelType::STM, 0x0000000F);
-    // Header(4) + operation(1) + hw_type(1) + mask(4) = 10 bytes
-    CHECK(pkt.size() == 10);
+    // Header(4) + [version, operation, reserved(2), hw_type, hw_accel_version, mask(4)] = 14 bytes
+    CHECK(pkt.size() == 14);
     CHECK(pkt[0] == 0x4B);
     CHECK(pkt[1] == 0x12);
     CHECK(pkt[2] == 0x24);  // 548 low
     CHECK(pkt[3] == 0x02);  // 548 high
-    CHECK(pkt[4] == QdssHwAccelOp::ENABLE);   // 1
-    CHECK(pkt[5] == QdssHwAccelType::STM);    // 1
-    CHECK(pkt[6] == 0x0F);  // mask byte 0
-    CHECK(pkt[7] == 0x00);
-    CHECK(pkt[8] == 0x00);
-    CHECK(pkt[9] == 0x00);
+    CHECK(pkt[4] == 2);                       // cmd_version (dynamic AtID default)
+    CHECK(pkt[5] == QdssHwAccelOp::ENABLE);   // 1
+    CHECK(pkt[6] == 0);                       // reserved [1/2]
+    CHECK(pkt[7] == 0);                       // reserved [2/2]
+    CHECK(pkt[8] == QdssHwAccelType::STM);    // hw_type = 1
+    CHECK(pkt[9] == 1);                       // hw_accel_version
+    CHECK(pkt[10] == 0x0F);                   // mask byte 0
+    CHECK(pkt[11] == 0x00);
+    CHECK(pkt[12] == 0x00);
+    CHECK(pkt[13] == 0x00);
     PASS("hw_accel_enable");
 }
 
 TEST(hw_accel_disable) {
-    auto pkt = build_qdss_hw_accel_disable(QdssHwAccelType::ATB);
-    CHECK(pkt.size() == 6);
-    CHECK(pkt[4] == QdssHwAccelOp::DISABLE);  // 0
-    CHECK(pkt[5] == QdssHwAccelType::ATB);    // 2
+    auto pkt = build_qdss_hw_accel_disable(QdssHwAccelType::ATB, 0x0000000F);
+    // Header(4) + [version, operation, reserved(2), hw_type, hw_accel_version, mask(4)] = 14 bytes
+    CHECK(pkt.size() == 14);
+    CHECK(pkt[4] == 2);                        // cmd_version
+    CHECK(pkt[5] == QdssHwAccelOp::DISABLE);   // 0
+    CHECK(pkt[6] == 0);                        // reserved [1/2]
+    CHECK(pkt[7] == 0);                        // reserved [2/2]
+    CHECK(pkt[8] == QdssHwAccelType::ATB);     // hw_type = 2
+    CHECK(pkt[9] == 1);                        // hw_accel_version
+    CHECK(pkt[10] == 0x0F);                    // mask byte 0
+    CHECK(pkt[11] == 0x00);
+    CHECK(pkt[12] == 0x00);
+    CHECK(pkt[13] == 0x00);
     PASS("hw_accel_disable");
 }
 
@@ -76,28 +94,32 @@ TEST(hw_accel_disable) {
 
 TEST(stm_enable) {
     auto pkt = build_qdss_stm_enable(QdssProcessorMask::ALL);
-    // Header(4) + command(1) + processor_mask(1) = 6 bytes
-    CHECK(pkt.size() == 6);
+    // Header(4) + [version, processor_mask, stm_command] = 7 bytes
+    CHECK(pkt.size() == 7);
     CHECK(pkt[0] == 0x4B);
     CHECK(pkt[1] == 0x12);
     CHECK(pkt[2] == 0x14);  // 532 = 0x0214 low
     CHECK(pkt[3] == 0x02);  // 0x0214 high
-    CHECK(pkt[4] == QdssStmCommand::ENABLE_DIAG_OVER_STM);  // 1
+    CHECK(pkt[4] == 2);                                      // version
     CHECK(pkt[5] == QdssProcessorMask::ALL);                 // 0x3F
+    CHECK(pkt[6] == QdssStmCommand::ENABLE_DIAG_OVER_STM);  // 1
     PASS("stm_enable");
 }
 
 TEST(stm_disable) {
     auto pkt = build_qdss_stm_disable();
-    CHECK(pkt.size() == 6);
-    CHECK(pkt[4] == QdssStmCommand::DISABLE_DIAG_OVER_STM);  // 0
-    CHECK(pkt[5] == QdssProcessorMask::ALL);
+    // Header(4) + [version, processor_mask, stm_command] = 7 bytes
+    CHECK(pkt.size() == 7);
+    CHECK(pkt[4] == 2);                                       // version
+    CHECK(pkt[5] == QdssProcessorMask::ALL);                  // 0x3F
+    CHECK(pkt[6] == QdssStmCommand::DISABLE_DIAG_OVER_STM);  // 0
     PASS("stm_disable");
 }
 
 TEST(stm_enable_specific_processor) {
     auto pkt = build_qdss_stm_enable(QdssProcessorMask::MODEM | QdssProcessorMask::APSS);
-    CHECK(pkt[5] == (QdssProcessorMask::MODEM | QdssProcessorMask::APSS));  // 0x09
+    CHECK(pkt[5] == (QdssProcessorMask::MODEM | QdssProcessorMask::APSS));  // 0x09 (processor_mask)
+    CHECK(pkt[6] == QdssStmCommand::ENABLE_DIAG_OVER_STM);                  // 1
     PASS("stm_enable_specific_processor");
 }
 
@@ -195,46 +217,62 @@ TEST(entity_cmd_mapping) {
 // --- HW accel response parser ---
 
 TEST(parse_hw_accel_response_basic) {
-    // Simulate a response: status=0, num_types=2
-    // Type 0: STM, supported=1, mask=0x0000000F
-    // Type 1: ATB, supported=0, mask=0x00000000
+    // Real dynamic-AtID QUERY response layout:
+    //   [cmd_ver][op echo][reserved][hw_type echo][hw_ver echo][transport][num_types]
+    //   then num_types entries: [type][ver][supported:4 LE][enabled:4 LE][atid] (11 bytes)
+    // Type 0: STM, ver=1, supported=0x0000000F, atid=0x10
+    // Type 1: ATB, ver=1, supported=0x00000003, atid=0x32
     ByteBuffer payload = {
-        0x00,  // status = success
+        0x02,  // cmd_version = 2
+        0x02,  // operation (echo QUERY)
+        0x00,  // reserved
+        0x00,  // hw_type (echo)
+        0x00,  // hw_accel_version (echo)
+        0x02,  // diag_transport (USB in QDSS_TRACE enum)
         0x02,  // num_types = 2
-        // Entry 0: STM
-        QdssHwAccelType::STM, 0x01, 0x0F, 0x00, 0x00, 0x00,
+        // Entry 0: STM  [type][ver][supported:4][enabled:4][atid]
+        QdssHwAccelType::STM, 0x01, 0x0F, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10,
         // Entry 1: ATB
-        QdssHwAccelType::ATB, 0x00, 0x00, 0x00, 0x00, 0x00,
+        QdssHwAccelType::ATB, 0x01, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x32,
     };
     auto info = parse_qdss_hw_accel_response(payload);
+    CHECK(info.response_version == 2);
+    CHECK(info.diag_transport == 2);
     CHECK(info.stm_supported == true);
     CHECK(info.stm_diagid_mask == 0x0000000F);
-    CHECK(info.atb_supported == false);
-    CHECK(info.atb_diagid_mask == 0x00000000);
+    CHECK(info.stm_atid == 0x10);
+    CHECK(info.atb_supported == true);
+    CHECK(info.atb_diagid_mask == 0x00000003);
+    CHECK(info.atb_atid == 0x32);
     CHECK(info.lpass_stm_supported == false);
     PASS("parse_hw_accel_response_basic");
 }
 
-TEST(parse_hw_accel_response_with_dynamic_atid) {
-    // Response with version 2 (dynamic ATIDs)
+TEST(parse_hw_accel_response_unknown_ver) {
+    // Entry with hw_accel_ver != 1 should be skipped. 11-byte entries.
     ByteBuffer payload = {
-        0x00,  // status
-        0x01,  // num_types
-        QdssHwAccelType::STM, 0x01, 0xFF, 0x00, 0x00, 0x00,  // STM entry
-        QdssResponseVersion::DYNAMIC_ATID,  // response version = 2
-        0x01,  // num_atid_entries
-        QdssHwAccelType::STM, 0x20,  // STM atid = 32
+        0x02,  // cmd_version = 2
+        0x02,  // operation (echo)
+        0x00,  // reserved
+        0x00,  // hw_type (echo)
+        0x00,  // hw_accel_version (echo)
+        0x02,  // diag_transport
+        0x02,  // num_types = 2
+        // Entry 0: STM with unknown hw_accel_ver=2 — should be skipped
+        QdssHwAccelType::STM, 0x02, 0x0F, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10,
+        // Entry 1: ATB with hw_accel_ver=1 — should be parsed
+        QdssHwAccelType::ATB, 0x01, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x32,
     };
     auto info = parse_qdss_hw_accel_response(payload);
-    CHECK(info.stm_supported == true);
-    CHECK(info.stm_diagid_mask == 0x000000FF);
-    CHECK(info.response_version == QdssResponseVersion::DYNAMIC_ATID);
-    CHECK(info.stm_atid == 0x20);  // Dynamic ATID = 32
-    PASS("parse_hw_accel_response_with_dynamic_atid");
+    CHECK(info.stm_supported == false);   // skipped due to ver != 1
+    CHECK(info.atb_supported == true);
+    CHECK(info.atb_diagid_mask == 0x00000007);
+    PASS("parse_hw_accel_response_unknown_ver");
 }
 
 TEST(parse_hw_accel_response_error_status) {
-    ByteBuffer payload = { 0x01, 0x00 };  // status=1 (error)
+    // Too-short payload (< 7-byte header) yields nothing supported.
+    ByteBuffer payload = { 0x02, 0x02, 0x00, 0x00 };
     auto info = parse_qdss_hw_accel_response(payload);
     CHECK(info.stm_supported == false);
     CHECK(info.atb_supported == false);
@@ -242,7 +280,7 @@ TEST(parse_hw_accel_response_error_status) {
 }
 
 TEST(parse_hw_accel_response_too_short) {
-    ByteBuffer payload = { 0x00 };  // Too short
+    ByteBuffer payload = { 0x01, 0x00, 0x03 };  // Only 3 bytes, need at least 4
     auto info = parse_qdss_hw_accel_response(payload);
     CHECK(info.stm_supported == false);
     PASS("parse_hw_accel_response_too_short");

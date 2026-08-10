@@ -3,17 +3,17 @@
 //
 // Centralized CLI argument and command definitions (single source of truth).
 
-#ifndef DIAGLOGGER_CLI_ARGUMENT_DEFINITIONS_H
-#define DIAGLOGGER_CLI_ARGUMENT_DEFINITIONS_H
-
-#include "cli_options.h"
+#ifndef QC_CLI_ARGUMENT_DEFINITIONS_H
+#define QC_CLI_ARGUMENT_DEFINITIONS_H
 
 #include <functional>
 #include <map>
 #include <string>
 #include <vector>
 
-namespace diaglogger {
+#include "cli_options.h"
+
+namespace QC {
 
 enum class ArgumentType {
     FLAG,
@@ -62,6 +62,6 @@ private:
     static void initialize();
 };
 
-} // namespace diaglogger
+} // namespace QC
 
-#endif // DIAGLOGGER_CLI_ARGUMENT_DEFINITIONS_H
+#endif // QC_CLI_ARGUMENT_DEFINITIONS_H

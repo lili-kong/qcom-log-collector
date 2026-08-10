@@ -3,13 +3,14 @@
 //
 // Unit tests for HDLC encode/decode and CRC-16.
 
-#include "hdlc/hdlc.h"
-#include "hdlc/crc16.h"
 #include <cassert>
-#include <iostream>
 #include <cstring>
+#include <iostream>
 
-using namespace diaglogger;
+#include "hdlc/crc16.h"
+#include "hdlc/hdlc.h"
+
+using namespace QC;
 
 static int tests_passed = 0;
 static int tests_failed = 0;

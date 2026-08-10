@@ -1,12 +1,12 @@
 // Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 // SPDX-License-Identifier: BSD 3-Clause Clear License
 
-#include "cli_parser.h"
-#include "cli_argument_definitions.h"
-
 #include <stdexcept>
 
-namespace diaglogger {
+#include "cli_argument_definitions.h"
+#include "cli_parser.h"
+
+namespace QC {
 
 CliParser::ParsedArg CliParser::extract_option(const std::string& arg) {
     if (arg.rfind("--", 0) != 0) {
@@ -125,4 +125,4 @@ CliOptions CliParser::parse(int argc, char* argv[]) {
     return opts;
 }
 
-} // namespace diaglogger
+} // namespace QC

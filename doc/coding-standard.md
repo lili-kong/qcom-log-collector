@@ -15,7 +15,7 @@ Conventions observed and enforced across the codebase.
 | File names | `snake_case.cpp`, `snake_case.h` |
 | License header | `// SPDX-License-Identifier: Apache-2.0` on first line |
 | Copyright | `// Copyright 2024 Qualcomm Innovation Center, Inc.` |
-| Include guards | `#ifndef DIAGLOGGER_<FILENAME>_H` / `#define` / `#endif` (no `#pragma once`) |
+| Include guards | `#ifndef QC_<FILENAME>_H` / `#define` / `#endif` (no `#pragma once`) |
 | Include order | System headers first, then project headers |
 | Namespace | All code in `namespace diaglogger { }` |
 
@@ -159,6 +159,7 @@ Don't use `auto` for:
 - `constexpr` for compile-time constants
 - Group related constants in nested namespaces or as `static constexpr` class members
 - No `#define` for constants
+- Avoid hard-coded numbers in source code — use named constants instead
 
 ```cpp
 constexpr uint8_t HDLC_FLAG = 0x7E;

@@ -3,12 +3,13 @@
 //
 // Unit tests for request/response signature pairing.
 
-#include "diag/response_pairing.h"
 #include <iostream>
-#include <string>
 #include <stdexcept>
+#include <string>
 
-using namespace diaglogger;
+#include "diag/response_pairing.h"
+
+using namespace QC;
 
 static int tests_passed = 0;
 static int tests_failed = 0;

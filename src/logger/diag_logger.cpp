@@ -1,21 +1,16 @@
 // Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 // SPDX-License-Identifier: BSD 3-Clause Clear License
 
-#include "diag_logger.h"
-#include "transport/transport_factory.h"
-#include "diaglogger/version.h"
-#include "diag/commands.h"
-#include "diag/handshake_commands.h"
-#include "diag/qdss_commands.h"
-#include "diag/adpl_commands.h"
-
-#include <iostream>
-#include <iomanip>
+#include <algorithm>
 #include <chrono>
 #include <cstring>
+#include <iomanip>
+#include <iostream>
 #include <sstream>
 #include <vector>
 #include <algorithm>
+#include <fstream>
+
 #include <KL/Macros.h>
 
 #ifdef TOOLS_TARGET_WINDOWS
@@ -25,11 +20,19 @@
 #include <unistd.h>
 #endif
 
-namespace diaglogger {
+#include "diag_logger.h"
+#include "logger/adpl/adpl.h"
+#include "transport/transport_factory.h"
+#include "diaglogger/version.h"
+#include "diag/commands.h"
+#include "diag/handshake_commands.h"
+#include "diag/qdss_commands.h"
+#include "diag/adpl_commands.h"
+
+namespace QC {
 
 DiagLogger::DiagLogger(const DiagLoggerConfig& config)
-    : config_(config)
-{
+    : config_(config) {
     transport_ = create_transport(config_.port_name, config_.baud_rate);
     transport_->set_verbose(config_.verbose);
 }
@@ -64,8 +67,13 @@ bool DiagLogger::do_connection() {
         return false;
     }
 
-    // Write .qlc metadata file (non-fatal)
-    write_qlc_file();
+    // Write .qlc metadata file (non-fatal). Once per session only — do_connection
+    // re-runs on reboot recovery, but the .qlc (like the continuous .diag) should
+    // not be duplicated.
+    if (!qlc_written_) {
+        write_qlc_file();
+        qlc_written_ = true;
+    }
 
     // Send CFG commands
     CFLOG_INFO("Sending CFG commands...", true);
@@ -80,12 +88,18 @@ bool DiagLogger::do_connection() {
 bool DiagLogger::start() {
     logging_started_ = true;
     CLOG_INFO("Logging started. Press Ctrl+C to stop.");
+    // Download QShrink4 databases in the background - never blocks logging.
+    qshrink_thread_ = std::thread(&DiagLogger::download_qshrink_files, this);
     return true;
 }
 
 void DiagLogger::stop() {
-    if (!running_.load()) {
-        return;  // Already stopped
+    // Run exactly once. NOTE: do NOT gate this on running_ — the rx loop and the
+    // transport thread clear running_ themselves on an unrecoverable disconnect,
+    // so gating here would skip the graceful teardown (QDSS/ADPL disable, mask
+    // clearing) on those exits.
+    if (stop_invoked_.exchange(true)) {
+        return;
     }
 
     // Send graceful disconnect commands only if logging was started
@@ -107,16 +121,32 @@ void DiagLogger::stop() {
     // Close files
     ptrace_.close();
 
-    // Print summary
-    CFLOG_INFO("\n--- Logging Summary ---", true);
-    CFLOG_INFO("RX packets:  " + std::to_string(stats_.rx_packets), true);
-    CFLOG_INFO("RX bytes:    " + std::to_string(stats_.rx_bytes), true);
-    CFLOG_INFO("TX packets:  " + std::to_string(stats_.tx_packets), true);
-    CFLOG_INFO("TX bytes:    " + std::to_string(stats_.tx_bytes), true);
-    CFLOG_INFO("Frame errors: " + std::to_string(stats_.frame_errors), true);
-    CFLOG_INFO("Ptrace file: " + ptrace_.path(), true);
-    CFLOG_INFO("Records:     " + std::to_string(ptrace_.record_count()), true);
-    CFLOG_INFO("File size:   " + std::to_string(ptrace_.bytes_written()) + " bytes", true);
+    // Stop QDSS manager if running
+    if (qdss_) {
+        qdss_->stop();
+    }
+
+    // Stop ADPL manager if running
+    if (adpl_) {
+        adpl_->stop();
+    }
+
+
+    // Diag capture (.diag). Prefer the actual file path from kLogger; fall back to
+    // the output directory if kLogger hasn't opened a file yet.
+    std::string diag_file = KL::Logger::get_instance().get_current_ptrace_file();
+    if (diag_file.empty()) {
+        diag_file = ptrace_.path();
+    }
+    CFLOG_INFO("Diag file:   " + diag_file, true);
+    CFLOG_INFO("Diag records:" + std::to_string(ptrace_.record_count()), true);
+    CFLOG_INFO("Diag bytes:  " + std::to_string(ptrace_.bytes_written()), true);
+
+    // QDSS capture (.bin), if enabled.
+    if (qdss_) {
+        CFLOG_INFO("QDSS file:   " + qdss_->output_file(), true);
+        CFLOG_INFO("QDSS bytes:  " + std::to_string(qdss_->bytes_captured()), true);
+    }
 }
 
 void DiagLogger::transport_ready_func() {
@@ -177,6 +207,8 @@ void DiagLogger::transport_ready_func() {
 
         if (!recovered) {
             CFLOG_INFO("Recovery failed after timeout.", true);
+            // Stop the worker loops before closing below, so rx_loop cannot call
+            // transport_->read() on a port that is being torn down.
             running_.store(false);
             break;
         }
@@ -190,6 +222,13 @@ void DiagLogger::transport_ready_func() {
     }
 
     transport_->close();
+
+    // Backstop: the paths that break out of the loop above already clear running_
+    // before closing. Repeat it here so any other exit still ends the worker loops
+    // and unblocks main()'s is_running() wait.
+    running_.store(false);
+    tx_cv_.notify_one();
+    rx_queue_cv_.notify_all();
 }
 
 bool DiagLogger::open_transport() {
@@ -204,6 +243,13 @@ bool DiagLogger::open_transport() {
 
     if (cfg_commands_.empty()) {
         CFLOG_WARNING("Warning: CFG file contains no commands", true);
+    }
+
+    // ADPL needs the DPL log codes enabled in the log mask, or the accelerated
+    // request succeeds but no packets stream. Merge them into the parsed masks
+    // once here so both the initial send and any recovery re-send carry them.
+    if (config_.enable_adpl) {
+        enable_adpl_log_codes();
     }
 
     // Open ptrace output file before connection so handshake is recorded
@@ -268,6 +314,12 @@ void DiagLogger::close_transport() {
         transport_thread_.join();
     }
 
+    // Join the QShrink4 download worker before the TX thread: running_ is already
+    // false, so its in-flight send_command() returns empty and the loop exits.
+    if (qshrink_thread_.joinable()) {
+        qshrink_thread_.join();
+    }
+
     // Wait for TX, RX, and dispatcher threads to end
     tx_cv_.notify_one();
     if (tx_thread_.joinable()) {
@@ -279,6 +331,25 @@ void DiagLogger::close_transport() {
     }
 
     rx_queue_cv_.notify_all();
+
+    // Close ptrace file
+    ptrace_.close();
+
+    // Print summary
+    CFLOG_INFO("\n--- Logging Summary ---", true);
+    CFLOG_INFO("RX packets:  " + std::to_string(stats_.rx_packets), true);
+    CFLOG_INFO("RX bytes:    " + std::to_string(stats_.rx_bytes), true);
+    CFLOG_INFO("TX packets:  " + std::to_string(stats_.tx_packets), true);
+    CFLOG_INFO("TX bytes:    " + std::to_string(stats_.tx_bytes), true);
+    CFLOG_INFO("Frame errors: " + std::to_string(stats_.frame_errors), true);
+    CFLOG_INFO("Ptrace file: " + ptrace_.path(), true);
+    CFLOG_INFO("Records:     " + std::to_string(ptrace_.record_count()), true);
+    CFLOG_INFO("File size:   " + std::to_string(ptrace_.bytes_written()) + " bytes", true);
+    if (adpl_) {
+        CFLOG_INFO("ADPL file:   " + adpl_->output_file(), true);
+        CFLOG_INFO("ADPL bytes:  " + std::to_string(adpl_->bytes_captured()), true);
+    }
+
     if (dispatcher_thread_.joinable()) {
         dispatcher_thread_.join();
     }
@@ -290,6 +361,13 @@ DiagStats DiagLogger::stats() const {
 }
 
 ByteBuffer DiagLogger::send_command(const ByteBuffer& payload, uint32_t timeout_ms) {
+    // Never enqueue once shutdown has begun: the tx thread may have already
+    // drained the queue, which would leave the promise unfulfilled forever.
+    // This keeps background callers (e.g. the QShrink4 download thread) from
+    // hanging on join.
+    if (!running_.load()) {
+        return {};
+    }
     if (timeout_ms == 0) {
         timeout_ms = config_.command_timeout_ms;
     }
@@ -299,7 +377,7 @@ ByteBuffer DiagLogger::send_command(const ByteBuffer& payload, uint32_t timeout_
     request->timeout_ms = timeout_ms;
     std::future<ByteBuffer> future = request->promise.get_future();
 
-    // Cancel any pending poll request — commands take priority
+    // Cancel any pending poll request - commands take priority
     poll_requested_.store(false);
 
     {
@@ -444,10 +522,10 @@ bool DiagLogger::do_loopback() {
     // in HDLC mode.  This matches TUF's TxWorker::onRun() (Diag.cpp:2062):
     //   HDLC_LOOPBACK_REQUEST = { 0x7B, 0x2C, 0x3D, 0x7E }
     // which is: loopback cmd (0x7B) + CRC-16 (0x2C, 0x3D) + HDLC flag (0x7E).
-    // No leading 0x7E flag — the first frame omits it.
+    // No leading 0x7E flag - the first frame omits it.
     // Sent raw via transport->write(), bypassing our hdlc_encode().
     {
-        static const uint8_t HDLC_LOOPBACK_RAW[] = { 0x7B, 0x2C, 0x3D, 0x7E };
+        static constexpr uint8_t HDLC_LOOPBACK_RAW[] = { 0x7B, 0x2C, 0x3D, 0x7E };
         transport_->write(HDLC_LOOPBACK_RAW, sizeof(HDLC_LOOPBACK_RAW));
         verbose_log("Sent raw HDLC loopback (4 bytes) to ensure HDLC mode");
         // Wait for device to fall back to HDLC mode (matches TUF's
@@ -457,7 +535,7 @@ bool DiagLogger::do_loopback() {
         // Drain any raw loopback response bytes from the ring buffer so the
         // HDLC decoder in send_command() starts with a clean slate.
         // The raw response (e.g. {7b 2c 3d 7e}) doesn't have a leading 0x7E,
-        // so the HDLC decoder can't parse it into a frame — just discard it.
+        // so the HDLC decoder can't parse it into a frame - just discard it.
         uint8_t drain_buf[64];
         transport_->read(drain_buf, sizeof(drain_buf), 0);
     }
@@ -511,22 +589,22 @@ bool DiagLogger::do_handshake() {
             verbose_log("Handshake: VERNO response received (" +
                         std::to_string(resp.size()) + " bytes)");
         } else {
-            verbose_log("Handshake: VERNO — not supported (continuing)");
+            verbose_log("Handshake: VERNO - not supported (continuing)");
         }
     }
 
     // 2. STATUS request
-    // A BAD_CMD (0x13) response is acceptable — it still confirms the device is alive.
+    // A BAD_CMD (0x13) response is acceptable - it still confirms the device is alive.
     {
         ByteBuffer cmd = build_status_request();
         ByteBuffer resp = send_command(cmd);
         if (resp.empty()) {
-            verbose_log("Handshake: STATUS request — timeout");
+            verbose_log("Handshake: STATUS request - timeout");
             return false;
         } else if (resp[0] == DiagError::BAD_CMD) {
-            verbose_log("Handshake: STATUS request — BAD_CMD (device alive)");
+            verbose_log("Handshake: STATUS request - BAD_CMD (device alive)");
         } else if (is_error_response(resp)) {
-            verbose_log("Handshake: STATUS request — error response");
+            verbose_log("Handshake: STATUS request - error response");
             return false;
         } else {
             handshake_state_.device_info.status = parse_status_response(resp);
@@ -535,14 +613,14 @@ bool DiagLogger::do_handshake() {
         }
     }
 
-    // 3. EXT_BUILD_ID request (informational only — does not affect handshake result)
+    // 3. EXT_BUILD_ID request (informational only - does not affect handshake result)
     {
         ByteBuffer cmd = build_ext_build_id_request();
         ByteBuffer resp = send_command(cmd);
         if (resp.empty()) {
-            verbose_log("Handshake: EXT_BUILD_ID request — timeout (continuing)");
+            verbose_log("Handshake: EXT_BUILD_ID request - timeout (continuing)");
         } else if (is_error_response(resp)) {
-            verbose_log("Handshake: EXT_BUILD_ID request — error response (continuing)");
+            verbose_log("Handshake: EXT_BUILD_ID request - error response (continuing)");
         } else {
             handshake_state_.device_info.ext_build_id = parse_ext_build_id_response(resp);
             verbose_log("Handshake: EXT_BUILD_ID response received (" +
@@ -559,7 +637,7 @@ bool DiagLogger::do_handshake() {
             verbose_log("Handshake: ESN response received (" +
                         std::to_string(resp.size()) + " bytes)");
         } else {
-            verbose_log("Handshake: ESN — not supported (continuing)");
+            verbose_log("Handshake: ESN - not supported (continuing)");
         }
     }
 
@@ -582,10 +660,10 @@ bool DiagLogger::do_handshake() {
         ByteBuffer cmd = build_security_key_request();
         ByteBuffer resp = send_command(cmd);
         if (resp.empty()) {
-            verbose_log("Handshake: Security key request — timeout");
+            verbose_log("Handshake: Security key request - timeout");
             return false;
         } else if (is_error_response(resp)) {
-            verbose_log("Handshake: Security key request — error response");
+            verbose_log("Handshake: Security key request - error response");
         } else {
             auto payload = extract_subsystem_payload(resp);
             handshake_state_.security_keys = parse_security_key_response(payload);
@@ -603,16 +681,16 @@ bool DiagLogger::do_handshake() {
         ByteBuffer cmd = build_feature_query();
         ByteBuffer resp = send_command(cmd);
         if (resp.empty()) {
-            verbose_log("Handshake: Feature query — timeout");
+            verbose_log("Handshake: Feature query - timeout");
             return false;
         } else if (is_error_response(resp)) {
-            verbose_log("Handshake: Feature query — error response");
+            verbose_log("Handshake: Feature query - error response");
             return false;
         } else {
             auto payload = extract_subsystem_payload(resp);
             handshake_state_.feature_query = parse_feature_query_response(payload);
             if (handshake_state_.feature_query.valid) {
-                verbose_log("Handshake: Feature query — mask=0x" + ([&]{
+                verbose_log("Handshake: Feature query - mask=0x" + ([&]{
                     std::ostringstream ss;
                     ss << std::hex << handshake_state_.feature_query.feature_mask;
                     return ss.str();
@@ -621,7 +699,7 @@ bool DiagLogger::do_handshake() {
                     " diagid=" +
                     (handshake_state_.feature_query.supports_diagid() ? "yes" : "no"));
             } else {
-                verbose_log("Handshake: Feature query — invalid response");
+                verbose_log("Handshake: Feature query - invalid response");
                 return false;
             }
         }
@@ -636,10 +714,10 @@ bool DiagLogger::do_handshake() {
             ByteBuffer cmd = build_diagid_feature_enable(HypervisorPacketFormat::BOTH);
             ByteBuffer resp = send_command(cmd);
             if (resp.empty()) {
-                verbose_log("Handshake: Hypervisor enable — no valid response");
+                verbose_log("Handshake: Hypervisor enable - no valid response");
                 return false;
             } else if (is_error_response(resp)) {
-               verbose_log("Handshake: Hypervisor enable — error response");
+               verbose_log("Handshake: Hypervisor enable - error response");
             }
             auto payload = extract_subsystem_payload(resp);
             auto result = parse_hypervisor_enable_response(payload);
@@ -657,11 +735,11 @@ bool DiagLogger::do_handshake() {
                 DiagIdPriorityOp::SET, handshake_state_.default_diag_id);
             ByteBuffer resp = send_command(cmd);
             if (resp.empty()) {
-                verbose_log("Handshake: DiagID priority config — no valid response");
+                verbose_log("Handshake: DiagID priority config - no valid response");
                 return false;
             }
             else if (is_error_response(resp)) {
-               verbose_log("Handshake: DiagID priority config — error response");
+               verbose_log("Handshake: DiagID priority config - error response");
             }
             auto payload = extract_subsystem_payload(resp);
             auto result = parse_diagid_priority_response(payload);
@@ -679,41 +757,82 @@ bool DiagLogger::do_handshake() {
             ByteBuffer cmd = build_diagid_table_query();
             ByteBuffer resp = send_command(cmd);
             if (resp.empty()) {
-                verbose_log("Handshake: DiagID table query — no valid response");
+                verbose_log("Handshake: DiagID table query - no valid response");
                 return false;
             }
             else if (is_error_response(resp)) {
-               verbose_log("Handshake: DiagID table config — error response");
+               verbose_log("Handshake: DiagID table config - error response");
             }
             auto payload = extract_subsystem_payload(resp);
             handshake_state_.diagid_table = parse_diagid_table_response(payload);
             if (handshake_state_.diagid_table.valid) {
-                verbose_log("Handshake: DiagID table — " +
+                verbose_log("Handshake: DiagID table - " +
                             std::to_string(handshake_state_.diagid_table.entries.size()) + " entries");
                 for (const auto& entry : handshake_state_.diagid_table.entries) {
                     verbose_log("  DiagID " + std::to_string(entry.diag_id) +
                                 " = " + entry.processor_name);
                 }
             } else {
-                verbose_log("Handshake: DiagID table — invalid response");
+                verbose_log("Handshake: DiagID table - invalid response");
             }
         }
     }
 
-    // 8b. QShrink4 GUID query
-    query_qshrink_guids();
+    // 8b. QShrink4 GUID query — once per session only. do_handshake re-runs on reboot
+    // recovery, but the download thread (launched once in start()) iterates
+    // handshake_state_.qshrink_guids; re-querying here would modify that vector
+    // concurrently (data race) and append duplicates. The DBs are already downloaded
+    // (skip-if-exists covers re-runs), so a single query on first connect suffices.
+    if (!qshrink_queried_) {
+        query_qshrink_guids();
+        qshrink_queried_ = true;
+    }
 
-    // TODO: Phase 2
-    // // 9. QDSS setup (if enabled)
-    // if (config_.enable_qdss) {
-    //     if (!setup_qdss()) {
-    //         return false;
-    //     }
-    // }
+    // 9. QDSS setup (if enabled)
+    if (config_.enable_qdss) {
+        // Open the QDSS trace port and start capturing BEFORE sending the enable
+        // commands. The device begins streaming (sync/config + buffered trace)
+        // immediately once QDSS is enabled, so the receiver must already be running
+        // or that initial data is lost. Matches TUF, where the QDSS port is open
+        // before configureDiagOverQdss() runs (Device/Protocol/Qdss.cpp).
+        //
+        // The Qdss instance (and its .bin file) is created ONCE per session. On reboot
+        // recovery, reopen the port into the SAME .bin instead of making a new file —
+        // matching TUF, which reopens the QDSS I/O and reconfigures rather than
+        // recreating the capture file. setup_qdss() re-runs either way to reconfigure
+        // the rebooted device.
+        if (!qdss_) {
+            qdss_ = std::make_unique<Qdss>();
+            if (!qdss_->open(config_.qdss_port_name, config_.output_path, config_.baud_rate)) {
+                CFLOG_ERROR("Error: Failed to open QDSS port.", true);
+                return false;
+            }
+            qdss_->start();
+        } else {
+            // Recovery: reopen the port, continuing capture to the same .bin.
+            if (!qdss_->reopen()) {
+                CFLOG_ERROR("Error: Failed to reopen QDSS port on recovery.", true);
+                return false;
+            }
+        }
+
+        if (!setup_qdss()) {
+            CFLOG_ERROR("Error: QDSS configuration failed.", true);
+            qdss_->stop();
+            return false;
+        }
+    }
 
     // 10. ADPL setup (if enabled)
+    //
+    // open the ADPL trace port and start capturing BEFORE sending the enable command. 
+    // The device begins streaming as soon as ADPL is enabled, so the receiver must
+    // already be running or the initial packets are lost. The Adpl instance and its 
+    // .adplvN file are created once per session; on reboot recovery we reopen the port
+    // into the SAME file.
     if (config_.enable_adpl) {
         if (!setup_adpl()) {
+            verbose_log("Handshake: ADPL setup failed");
             return false;
         }
     }
@@ -722,118 +841,112 @@ bool DiagLogger::do_handshake() {
     return true;
 }
 
+// ----------------------------------------------------------------------------
+// setup_qdss
+//
+// Sequence:
+//   1. Query HW acceleration capabilities
+//   2. Set trace sink to USB
+//   3. Enable ATB (highest priority)
+//   4. Enable LPASS STM (processors not covered by ATB)
+//   5. Enable STM (remaining processors)
+//   6. Enable SW trace filters per processor
+// ----------------------------------------------------------------------------
 bool DiagLogger::setup_qdss() {
     verbose_log("QDSS: Starting setup...");
 
-    // 1. Query HW acceleration capabilities
-    {
-        ByteBuffer cmd = build_qdss_hw_accel_query();
-        ByteBuffer resp = send_command(cmd);
-        if (resp.empty() || is_error_response(resp)) {
-            verbose_log("QDSS: HW accel query — failed");
-            return false;
+    // Create QdssDiagManager with send_command callback
+    qdss_diag_manager_ = std::make_unique<QdssDiagManager>(
+        [this](const ByteBuffer& cmd, uint32_t timeout_ms) {
+            return send_command(cmd, timeout_ms);
         }
-        auto payload = extract_subsystem_payload(resp);
-        handshake_state_.qdss_hw_accel = parse_qdss_hw_accel_response(payload);
-        verbose_log("QDSS: HW accel query — STM=" +
-                    std::string(handshake_state_.qdss_hw_accel.stm_supported ? "yes" : "no") +
-                    " ATB=" +
-                    std::string(handshake_state_.qdss_hw_accel.atb_supported ? "yes" : "no"));
+    );
+
+    if (!qdss_diag_manager_->configure_diag_over_qdss()) {
+        CFLOG_ERROR("Error: QDSS configuration failed.", true);
+        return false;
     }
 
-    // 2. Enable HW acceleration for STM if supported
-    if (handshake_state_.qdss_hw_accel.stm_supported) {
-        ByteBuffer cmd = build_qdss_hw_accel_enable(
-            QdssHwAccelType::STM, handshake_state_.qdss_hw_accel.stm_diagid_mask);
-        ByteBuffer resp = send_command(cmd);
-        if (resp.empty() || is_error_response(resp)) {
-            verbose_log("QDSS: HW accel STM enable — failed");
-            return false;
-        }
-        verbose_log("QDSS: HW accel STM enabled");
-    }
-
-    // 3. Enable Diag-over-STM
-    {
-        ByteBuffer cmd = build_qdss_stm_enable(config_.qdss_processor_mask);
-        ByteBuffer resp = send_command(cmd);
-        if (resp.empty() || is_error_response(resp)) {
-            verbose_log("QDSS: Diag-over-STM enable — failed");
-            return false;
-        }
-        verbose_log("QDSS: Diag-over-STM enabled (mask=0x" + ([&]{
-            std::ostringstream ss;
-            ss << std::hex << static_cast<int>(config_.qdss_processor_mask);
-            return ss.str();
-        })() + ")");
-    }
-
-    // 4. Set trace sink to USB
-    {
-        ByteBuffer cmd = build_qdss_set_trace_sink(QdssSinkType::USB);
-        ByteBuffer resp = send_command(cmd);
-        if (resp.empty() || is_error_response(resp)) {
-            verbose_log("QDSS: Set trace sink — failed");
-            return false;
-        }
-        verbose_log("QDSS: Trace sink set to USB");
-    }
-
-    // 5. Enable SW trace filters per processor
-    uint8_t mask = config_.qdss_processor_mask;
-    uint8_t processors[] = {
-        QdssProcessorMask::MODEM, QdssProcessorMask::ADSP,
-        QdssProcessorMask::WCNSS, QdssProcessorMask::APSS,
-        QdssProcessorMask::SLPI,  QdssProcessorMask::CDSP
-    };
-    for (uint8_t proc : processors) {
-        if (mask & proc) {
-            ByteBuffer cmd = build_qdss_filter_sw_trace(proc, true);
-            if (!cmd.empty()) {
-                ByteBuffer resp = send_command(cmd, 1000);
-                if (resp.empty() || is_error_response(resp)) {
-                    verbose_log("QDSS: SW trace filter failed for processor 0x" + ([&]{
-                        std::ostringstream ss;
-                        ss << std::hex << static_cast<int>(proc);
-                        return ss.str();
-                    })());
-                    return false;
-                }
-                verbose_log("QDSS: SW trace filter enabled for processor 0x" + ([&]{
-                    std::ostringstream ss;
-                    ss << std::hex << static_cast<int>(proc);
-                    return ss.str();
-                })());
-            }
-        }
-    }
+    // Store HW accel info for .qlc metadata file
+    handshake_state_.qdss_hw_accel = qdss_diag_manager_->hw_accel_info();
 
     verbose_log("QDSS: Setup complete.");
     return true;
 }
 
+// QDSS configuration functions are in src/logger/qdss/qdss_diag_manager.cpp
+
+// ----------------------------------------------------------------------------
+// setup_adpl
+//
+// Sequence:
+//   1. First connection: create Adpl, open its \DPL transport + .adplvN file,
+//      and start the RX thread BEFORE sending the enable command.
+//   2. Recovery: reopen the ADPL port into the same file (Adpl::reopen).
+//   3. Send the ADPL enable subsystem command (IPA/ACCELERATED_IPA_REQUEST).
+//   4. Store the negotiated protocol version for stop_logging()'s disable path.
+// ----------------------------------------------------------------------------
 bool DiagLogger::setup_adpl() {
-    verbose_log("ADPL: Starting setup (version=" +
+    if (!config_.enable_adpl) {
+        return false;
+    }
+
+    verbose_log("ADPL: Starting setup (requested version=" +
                 std::to_string(config_.adpl_version) + ")...");
 
+    auto hex_dump = [](const ByteBuffer& b) {
+        std::ostringstream ss;
+        for (size_t i = 0; i < b.size() && i < 40; ++i)
+            ss << ' ' << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(b[i]);
+        ss << " (len=" << std::dec << b.size() << ")";
+        return ss.str();
+    };
+
+    // 1. Enable ADPL over the diag port FIRST, and read the NEGOTIATED version.
+    // The device may downgrade (e.g. request v7 -> negotiate v6). The capture file's
+    // .adplvN extension must reflect the negotiated version, so it is opened only
+    // after this. No ADPL data flows on \DPL until the enable succeeds, so opening
+    // the capture afterwards loses nothing.
     ByteBuffer cmd = build_adpl_enable(config_.adpl_version);
+    CFLOG_INFO("ADPL enable req:" + hex_dump(cmd), true);   // TEMP DIAGNOSTIC
     ByteBuffer resp = send_command(cmd);
+    CFLOG_INFO("ADPL enable resp:" + hex_dump(resp), true); // TEMP DIAGNOSTIC
     if (resp.empty()) {
-        verbose_log("ADPL: Enable — no response");
+        verbose_log("ADPL: Enable - no response");
         return false;
     }
 
     auto payload = extract_subsystem_payload(resp);
     auto result = parse_adpl_enable_response(payload);
     if (!result.ok()) {
-        verbose_log("ADPL: Enable failed (status=" +
-                    std::to_string(result.status) + ")");
+        CFLOG_INFO("ADPL: Enable failed (status=" +
+                   std::to_string(result.status) + ")", true);   // TEMP DIAGNOSTIC
         return false;
     }
 
     handshake_state_.adpl_negotiated_version = result.version;
-    verbose_log("ADPL: Enabled (negotiated version=" +
-                std::to_string(result.version) + ")");
+    CFLOG_INFO("ADPL: Enabled (negotiated version=" +
+               std::to_string(result.version) + ")", true);   // TEMP DIAGNOSTIC
+
+    // 2. Open the \DPL capture with the NEGOTIATED version (so the file extension
+    // matches the actual wire format). On recovery, reopen into the same file.
+    if (!adpl_) {
+        adpl_ = std::make_unique<Adpl>();
+        if (!adpl_->open(config_.adpl_port_name, config_.output_path,
+                         config_.baud_rate, result.version)) {
+            CFLOG_ERROR("Error: Failed to open ADPL port.", true);
+            adpl_.reset();
+            return false;
+        }
+        adpl_->start();
+    } else {
+        // Recovery: reopen into the same .adplvN file.
+        if (!adpl_->reopen()) {
+            CFLOG_ERROR("Error: Failed to reopen ADPL port on recovery.", true);
+            return false;
+        }
+    }
+
     return true;
 }
 
@@ -841,39 +954,21 @@ bool DiagLogger::stop_logging() {
     CFLOG_INFO("Sending disconnect commands...", true);
     bool all_ok = true;
 
-    // Matches TUF Diag::disconnect() teardown sequence (Diag.cpp:8600-8658).
-
     // 1. Disable ADPL if it was enabled
     if (config_.enable_adpl && handshake_state_.adpl_negotiated_version > 0) {
         ByteBuffer cmd = build_adpl_disable();
         ByteBuffer resp = send_command(cmd, 1000);
         all_ok &= (!resp.empty() && !is_error_response(resp));
-        verbose_log("Disconnect: ADPL disable — " +
+        verbose_log("Disconnect: ADPL disable - " +
                     std::string(resp.empty() ? "no response" : "done"));
     }
 
     // 2. Disable QDSS if it was enabled
-    if (config_.enable_qdss) {
-        // Disable Diag-over-STM
-        {
-            ByteBuffer cmd = build_qdss_stm_disable();
-            ByteBuffer resp = send_command(cmd, 1000);
-            all_ok &= (!resp.empty() && !is_error_response(resp));
-            verbose_log("Disconnect: QDSS STM disable — " +
-                        std::string(resp.empty() ? "no response" : "done"));
-        }
-
-        // Disable all HW acceleration types at once
-        {
-            ByteBuffer cmd = build_qdss_hw_accel_disable(QdssHwAccelType::ALL);
-            ByteBuffer resp = send_command(cmd, 1000);
-            all_ok &= (!resp.empty() && !is_error_response(resp));
-            verbose_log("Disconnect: QDSS HW accel disable — " +
-                        std::string(resp.empty() ? "no response" : "done"));
-        }
+    if (config_.enable_qdss && qdss_diag_manager_) {
+        qdss_diag_manager_->disable_diag_over_qdss();
     }
 
-    // 3. Clear all masks (matches TUF sendMaskConfigurationCommands with empty masks)
+    // 3. Clear all masks
 
     // 3a. Disable log masks (all equipment IDs 0-15)
     {
@@ -923,7 +1018,7 @@ bool DiagLogger::stop_logging() {
         verbose_log("Disconnect: QshMetrics disabled");
     }
 
-    // 4. STATUS poll to flush — ensures device acknowledges all mask changes
+    // 4. STATUS poll to flush - ensures device acknowledges all mask changes
     {
         ByteBuffer cmd = build_status_request();
         ByteBuffer resp = send_command(cmd, 1000);
@@ -938,71 +1033,446 @@ bool DiagLogger::stop_logging() {
 bool DiagLogger::query_qshrink_guids() {
     verbose_log("QShrink4: Querying GUID tables...");
 
+    // Dump up to 80 bytes so a few FILE_LIST entries (16B hdr + 20B/entry) are
+    // captured - lets us confirm the per-version entry layout on a device.
+    auto hex_dump = [](const ByteBuffer& b) {
+        std::ostringstream ss;
+        for (size_t i = 0; i < b.size() && i < 80; ++i)
+            ss << ' ' << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(b[i]);
+        ss << " (len=" << std::dec << b.size() << ")";
+        return ss.str();
+    };
+
+    // The FILE_LIST immediate response carries the GUIDs but ZERO file sizes; the
+    // real sizes arrive in a delayed SUBSYS_V2 response (TUF processes FILE_LIST
+    // only from the delayed path for v2/v3). Capture delayed frames the same way
+    // the download worker captures FILE_READ chunks, and wait for the FILE_LIST one.
+    auto wait_delayed_file_list = [&](uint16_t subcmd) -> ByteBuffer {
+        auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+        while (running_.load()) {
+            std::unique_lock<std::mutex> lock(qshrink_rx_mutex_);
+            bool got = qshrink_rx_cv_.wait_for(lock, std::chrono::milliseconds(500),
+                [&] { return !qshrink_rx_queue_.empty() || !running_.load(); });
+            if (!running_.load()) return {};
+            if (!got || qshrink_rx_queue_.empty()) {
+                if (std::chrono::steady_clock::now() >= deadline) return {};
+                continue;
+            }
+            ByteBuffer frame = std::move(qshrink_rx_queue_.front());
+            qshrink_rx_queue_.pop();
+            lock.unlock();
+
+            SubsysV2Header hdr = parse_subsys_v2_header(frame);
+            if (!hdr.valid || hdr.command != subcmd || frame.size() < 16) continue;
+            uint16_t op = static_cast<uint16_t>(frame[14]) | (static_cast<uint16_t>(frame[15]) << 8);
+            if (op != HandshakeCmd::QSR4_OP_FILE_LIST) continue;
+            return frame;   // delayed FILE_LIST response for this peripheral
+        }
+        return {};
+    };
+
+    // Enable delayed-frame capture for the whole GUID query; only FILE_LIST commands
+    // are sent here, so capturing unpaired SUBSYS_V2 DIAG_SERV frames is safe.
+    {
+        std::lock_guard<std::mutex> lock(qshrink_rx_mutex_);
+        std::queue<ByteBuffer> empty;
+        std::swap(qshrink_rx_queue_, empty);
+    }
+    qshrink_capturing_.store(true);
+
     const auto& peripherals = get_qshrink_peripherals();
     for (const auto& periph : peripherals) {
         bool got_result = false;
+        const std::string comp = qshrink_component_label(periph.subcmd);
+        uint16_t negotiated_version = 0;
+        size_t negotiated_files = 0;
 
         // Try protocol versions 3, 2, 1
         for (uint16_t version = 3; version >= 1 && !got_result; --version) {
             static constexpr int MAX_EFS_RETRIES = 3;
             for (int retry = 0; retry < MAX_EFS_RETRIES; ++retry) {
+                // Drop any delayed frames left over from a prior attempt.
+                {
+                    std::lock_guard<std::mutex> lock(qshrink_rx_mutex_);
+                    std::queue<ByteBuffer> empty;
+                    std::swap(qshrink_rx_queue_, empty);
+                }
                 ByteBuffer cmd = build_qshrink_file_list(periph.subcmd, version);
+                verbose_log("QShrink4 [" + comp + "] FILE_LIST v" + std::to_string(version) +
+                            " req:" + hex_dump(cmd));
                 ByteBuffer resp = send_command(cmd);
 
                 if (resp.empty()) {
-                    verbose_log("QShrink4: " + std::string(periph.name) +
-                                " v" + std::to_string(version) + " — no response");
+                    verbose_log("QShrink4 [" + comp + "] FILE_LIST v" +
+                                std::to_string(version) + " - no response");
                     break;  // no response, try next version
                 }
 
-                auto payload = extract_subsystem_payload(resp);
-                auto result = parse_qshrink_file_list(payload);
+                verbose_log("QShrink4 [" + comp + "] FILE_LIST v" + std::to_string(version) +
+                            " resp:" + hex_dump(resp));
+
+                auto result = parse_qshrink_file_list(resp, version);
 
                 if (!result.valid) {
-                    verbose_log("QShrink4: " + std::string(periph.name) +
-                                " v" + std::to_string(version) + " — invalid response");
+                    verbose_log("QShrink4 [" + comp + "] FILE_LIST v" +
+                                std::to_string(version) + " - invalid response");
                     break;  // invalid, try next version
                 }
 
                 // EFS busy/retry errors (status 6 or 8)
                 if (result.status == 6 || result.status == 8) {
-                    verbose_log("QShrink4: " + std::string(periph.name) +
-                                " v" + std::to_string(version) +
-                                " — EFS error (status=" + std::to_string(result.status) +
+                    verbose_log("QShrink4 [" + comp + "] FILE_LIST v" +
+                                std::to_string(version) +
+                                " - EFS error (status=" + std::to_string(result.status) +
                                 "), retry " + std::to_string(retry + 1));
                     continue;  // retry same version
                 }
 
                 if (result.ok() && !result.files.empty()) {
-                    for (const auto& file : result.files) {
+                    // The immediate response gives GUIDs with size 0. If it is not the
+                    // final response (resp_id != 0), the real sizes come in a delayed
+                    // FILE_LIST response - wait for it and re-parse.
+                    QshrinkFileListResult sized = result;   // fallback: immediate (size 0)
+                    SubsysV2Header imm_hdr = parse_subsys_v2_header(resp);
+                    if (!imm_hdr.is_final()) {
+                        ByteBuffer delayed = wait_delayed_file_list(periph.subcmd);
+                        if (!delayed.empty()) {
+                            verbose_log("QShrink4 [" + comp + "] FILE_LIST v" +
+                                        std::to_string(version) + " delayed resp:" +
+                                        hex_dump(delayed));
+                            auto dresult = parse_qshrink_file_list(delayed, version);
+                            if (dresult.valid && !dresult.files.empty()) {
+                                sized = dresult;   // real file sizes
+                            }
+                        } else {
+                            CFLOG_INFO("QShrink4 [" + comp + "] FILE_LIST v" +
+                                       std::to_string(version) +
+                                       " - no delayed response (sizes unknown)", true);
+                        }
+                    }
+
+                    for (auto file : sized.files) {
+                        file.peripheral_subcmd = periph.subcmd;
+                        // file.version is already the device-echoed version from the
+                        // parser - do NOT overwrite with the requested version.
                         handshake_state_.qshrink_guids.push_back(file);
                     }
                     // Populate GUID in matching diagid_table entry
                     for (auto& de : handshake_state_.diagid_table.entries) {
                         if (de.processor_name == periph.name) {
-                            de.guid = result.files[0].guid;
+                            de.guid = sized.files[0].guid;
                             break;
                         }
                     }
-                    verbose_log("QShrink4: " + std::string(periph.name) +
-                                " v" + std::to_string(version) + " — " +
-                                std::to_string(result.files.size()) + " file(s)");
+                    negotiated_version = sized.version;  // echoed version
+                    negotiated_files = sized.files.size();
                     got_result = true;
                 } else {
-                    verbose_log("QShrink4: " + std::string(periph.name) +
-                                " v" + std::to_string(version) +
-                                " — status=" + std::to_string(result.status) +
-                                ", " + std::to_string(result.files.size()) + " files");
+                    // Visible on stdout: shows each version the device rejected and
+                    // its status, so the downgrade path (e.g. v3->v2) is traceable.
+                    CFLOG_INFO("QShrink4 [" + comp + "] FILE_LIST v" +
+                               std::to_string(version) +
+                               " - rejected (status=" + std::to_string(result.status) +
+                               ", " + std::to_string(result.files.size()) + " files)", true);
                     break;  // non-retryable status, try next version
                 }
                 break;  // got a valid response, stop retrying
             }
         }
+
+        // Always-visible per-component negotiation result.
+        if (got_result) {
+            CFLOG_INFO("QShrink4 [" + comp + "] FILE_LIST negotiated v" +
+                       std::to_string(negotiated_version) + " - " +
+                       std::to_string(negotiated_files) + " file(s)", true);
+        } else {
+            CFLOG_INFO("QShrink4 [" + comp + "] FILE_LIST - no version accepted (skipped)", true);
+        }
+    }
+
+    qshrink_capturing_.store(false);
+    {
+        std::lock_guard<std::mutex> lock(qshrink_rx_mutex_);
+        std::queue<ByteBuffer> empty;
+        std::swap(qshrink_rx_queue_, empty);
     }
 
     verbose_log("QShrink4: Total GUIDs collected: " +
                 std::to_string(handshake_state_.qshrink_guids.size()));
     return !handshake_state_.qshrink_guids.empty();
+}
+
+void DiagLogger::download_qshrink_files() {
+    const auto& files = handshake_state_.qshrink_guids;
+    if (files.empty()) {
+        verbose_log("QShrink4 download: no GUIDs collected, nothing to download");
+        return;
+    }
+
+    // Resolve output directory prefix once (same logic as write_qlc_file()).
+    std::string dir = config_.output_path;
+    if (!dir.empty() && dir.back() != '/' && dir.back() != '\\') dir += '/';
+
+    auto hex_dump = [](const ByteBuffer& b) {
+        std::ostringstream ss;
+        for (size_t i = 0; i < b.size() && i < 40; ++i)
+            ss << ' ' << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(b[i]);
+        ss << " (len=" << std::dec << b.size() << ")";
+        return ss.str();
+    };
+
+    for (const auto& entry : files) {
+        if (!running_.load()) return;
+
+        std::string guid_str = guid_to_string(entry.guid);
+        const std::string comp = qshrink_component_label(entry.peripheral_subcmd);
+
+        // A FILE_LIST entry with size 0 is NOT present on the device (it lives on the
+        // server / must be supplied by the user). TUF removes these from the download
+        // candidates rather than FILE_OPEN/READ them - doing so returns an error and a
+        // 0-byte read. Skip them here too.
+        if (entry.file_length == 0) {
+            CFLOG_INFO("QShrink4 [" + comp + "] skip guid=" + guid_str +
+                       " (FILE_LIST size=0, not on device)", true);
+            continue;
+        }
+
+        // Skip the download if the decompressed .qsr4 already exists in the output
+        // folder (matches TUF's doesFileExist check). The saved name uses the guid from
+        // the .qdb header, which is the FILE_LIST guid in GUID mixed-endian order
+        // (Data1/2/3 byte-reversed); apply that swap to predict the filename.
+        std::array<uint8_t, 16> qsr4_guid = entry.guid;
+        std::swap(qsr4_guid[0], qsr4_guid[3]);
+        std::swap(qsr4_guid[1], qsr4_guid[2]);
+        std::swap(qsr4_guid[4], qsr4_guid[5]);
+        std::swap(qsr4_guid[6], qsr4_guid[7]);
+        std::string existing_path = dir + "msg_hash_" + guid_to_string(qsr4_guid) + ".qsr4";
+        if (std::ifstream(existing_path, std::ios::binary).good()) {
+            CFLOG_INFO("QShrink4 [" + comp + "] skip guid=" + guid_str +
+                       " (already downloaded: " + existing_path + ")", true);
+            continue;
+        }
+
+        // FILE_LIST negotiates the version; file ops downgrade v3->v2 (device only
+        // supports OPEN/READ/CLOSE at v2). For v2/v3 the device answers OPEN/READ/CLOSE
+        // on the DELAYED path (like FILE_LIST): the immediate response is only an ack
+        // with placeholder values (fd=0 for OPEN, status=5 for READ) and must be
+        // ignored. TUF's immediate dispatch handles these ops only for version 1, so
+        // the REAL fd / data come from the delayed responses.
+        uint16_t version = (entry.version == 3) ? 2 : entry.version;
+
+        auto clear_qshrink_queue = [&]() {
+            std::lock_guard<std::mutex> lock(qshrink_rx_mutex_);
+            std::queue<ByteBuffer> empty;
+            std::swap(qshrink_rx_queue_, empty);
+        };
+        // Wait for a DELAYED SUBSYS_V2 response for this peripheral with the given op.
+        auto wait_delayed = [&](uint16_t want_op, int timeout_ms) -> ByteBuffer {
+            auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+            while (running_.load()) {
+                std::unique_lock<std::mutex> lock(qshrink_rx_mutex_);
+                bool got = qshrink_rx_cv_.wait_for(lock, std::chrono::milliseconds(300),
+                    [&] { return !qshrink_rx_queue_.empty() || !running_.load(); });
+                if (!running_.load()) return {};
+                if (!got || qshrink_rx_queue_.empty()) {
+                    if (std::chrono::steady_clock::now() >= deadline) return {};
+                    continue;
+                }
+                ByteBuffer f = std::move(qshrink_rx_queue_.front());
+                qshrink_rx_queue_.pop();
+                lock.unlock();
+                SubsysV2Header h = parse_subsys_v2_header(f);
+                if (!h.valid || h.command != entry.peripheral_subcmd || f.size() < 16) continue;
+                uint16_t op = static_cast<uint16_t>(f[14]) | (static_cast<uint16_t>(f[15]) << 8);
+                if (op != want_op) continue;
+                return f;
+            }
+            return {};
+        };
+
+        qshrink_capturing_.store(true);
+
+        // ---- FILE_OPEN: the real fd is in the DELAYED response ----
+        CFLOG_INFO("QShrink4 [" + comp + "] FILE_OPEN guid=" + guid_str + " v" +
+                   std::to_string(version) + " (FILE_LIST v" + std::to_string(entry.version) +
+                   ") size=" + std::to_string(entry.file_length) + " bytes", true);
+        clear_qshrink_queue();
+        ByteBuffer open_req = build_qshrink_file_open(entry.peripheral_subcmd, version, entry.guid);
+        verbose_log("QShrink4 [" + comp + "] FILE_OPEN req:" + hex_dump(open_req));
+        send_command(open_req);   // immediate ack (placeholder fd) - ignored
+        ByteBuffer open_del = wait_delayed(HandshakeCmd::QSR4_OP_FILE_OPEN, 5000);
+        if (open_del.empty()) {
+            std::string msg = "QShrink4 [" + comp + "] download FAILED (open): guid=" + guid_str
+                + " (no delayed response)";
+            CFLOG_ERROR(msg, true);
+            std::cout << msg << std::endl;
+            qshrink_capturing_.store(false);
+            clear_qshrink_queue();
+            continue;
+        }
+        verbose_log("QShrink4 [" + comp + "] FILE_OPEN delayed resp:" + hex_dump(open_del));
+        auto open_r = parse_qshrink_file_open_response(open_del);
+        if (!open_r.ok()) {
+            std::string msg = "QShrink4 [" + comp + "] download FAILED (open): guid=" + guid_str
+                + " status=" + std::to_string(open_r.status);
+            CFLOG_ERROR(msg, true);
+            std::cout << msg << std::endl;
+            qshrink_capturing_.store(false);
+            clear_qshrink_queue();
+            continue;
+        }
+        uint16_t fd = open_r.file_descriptor;
+        CFLOG_INFO("QShrink4 [" + comp + "] FILE_OPEN ok, fd=" + std::to_string(fd), true);
+
+        // ---- FILE_READ: request the whole file; data arrives as DELAYED responses ----
+        // The immediate response is a placeholder ack (status 5) and is ignored. The
+        // device streams the file as delayed SUBSYS_V2 FILE_READ responses (each a chunk
+        // with its own absolute offset/numBytes/status); reassemble by offset.
+        ByteBuffer qdb(entry.file_length, 0);
+        size_t total_bytes = 0;
+        bool read_ok = true;
+
+        auto place_chunk = [&](const ByteBuffer& frame) -> size_t {
+            auto rr = parse_qshrink_file_read_response(frame);
+            if (!rr.valid || rr.status != 0 || rr.data.empty()) return 0;
+            if (static_cast<size_t>(rr.offset) + rr.data.size() > qdb.size()) return 0;
+            std::copy(rr.data.begin(), rr.data.end(), qdb.begin() + rr.offset);
+            total_bytes += rr.data.size();
+            return rr.data.size();
+        };
+
+        clear_qshrink_queue();
+        ByteBuffer read_req =
+            build_qshrink_file_read(entry.peripheral_subcmd, version, fd, entry.file_length, 0);
+        verbose_log("QShrink4 [" + comp + "] FILE_READ req:" + hex_dump(read_req));
+        send_command(read_req);   // immediate ack - ignored; data comes delayed
+
+        bool done = false, first_del_logged = false;
+        auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(25);
+        while (!done && running_.load()) {
+            std::unique_lock<std::mutex> lock(qshrink_rx_mutex_);
+            bool got = qshrink_rx_cv_.wait_for(lock, std::chrono::milliseconds(500),
+                [&] { return !qshrink_rx_queue_.empty() || !running_.load(); });
+            if (!running_.load()) { read_ok = false; break; }
+            if (!got || qshrink_rx_queue_.empty()) {
+                if (std::chrono::steady_clock::now() >= deadline) break;
+                continue;
+            }
+            ByteBuffer frame = std::move(qshrink_rx_queue_.front());
+            qshrink_rx_queue_.pop();
+            lock.unlock();
+
+            SubsysV2Header hdr = parse_subsys_v2_header(frame);
+            if (!hdr.valid || hdr.command != entry.peripheral_subcmd || frame.size() < 16) continue;
+            uint16_t op = static_cast<uint16_t>(frame[14]) | (static_cast<uint16_t>(frame[15]) << 8);
+            if (op != HandshakeCmd::QSR4_OP_FILE_READ) continue;
+            if (!first_del_logged) {
+                verbose_log("QShrink4 [" + comp + "] FILE_READ delayed resp:" + hex_dump(frame));
+                first_del_logged = true;
+            }
+            place_chunk(frame);
+            if (hdr.is_final() || total_bytes >= entry.file_length) done = true;
+        }
+        read_ok = read_ok && (total_bytes >= entry.file_length);
+
+        // ---- FILE_CLOSE: send and consume its delayed response so it cannot mis-pair
+        // with the next file's FILE_OPEN (they share the same subsys+command signature).
+        clear_qshrink_queue();
+        ByteBuffer close_req = build_qshrink_file_close(entry.peripheral_subcmd, version, fd);
+        verbose_log("QShrink4 [" + comp + "] FILE_CLOSE req:" + hex_dump(close_req));
+        send_command(close_req);
+        wait_delayed(HandshakeCmd::QSR4_OP_FILE_CLOSE, 1500);
+
+        qshrink_capturing_.store(false);
+        clear_qshrink_queue();
+
+        if (!read_ok || total_bytes < entry.file_length) {
+            std::string msg = "QShrink4 [" + comp + "] download FAILED (read): guid=" + guid_str
+                + " got " + std::to_string(total_bytes) + "/" + std::to_string(entry.file_length)
+                + " bytes";
+            CFLOG_ERROR(msg, true);
+            std::cout << msg << std::endl;
+            continue;
+        }
+        CFLOG_INFO("QShrink4 [" + comp + "] FILE_READ ok: " + std::to_string(total_bytes) +
+                   "/" + std::to_string(entry.file_length) + " bytes", true);
+
+        // Validate + decompress + save
+        std::array<uint8_t, 16> file_guid{};
+        if (!validate_qdb_header(qdb, file_guid)) {
+            std::string msg = "QShrink4 [" + comp + "] download FAILED (bad .qdb header): guid=" + guid_str;
+            CFLOG_ERROR(msg, true);
+            std::cout << msg << std::endl;
+            continue;
+        }
+        std::string out_path = dir + "msg_hash_" + guid_to_string(file_guid) + ".qsr4";
+        if (!decompress_qdb_to_qsr4(qdb, out_path)) {
+            std::string msg = "QShrink4 [" + comp + "] download FAILED (decompress): guid=" + guid_str;
+            CFLOG_ERROR(msg, true);
+            std::cout << msg << std::endl;
+            continue;
+        }
+
+        CFLOG_INFO("QShrink4 [" + comp + "] saved: " + out_path, true);
+    }
+}
+
+void DiagLogger::enable_adpl_log_codes() {
+    // DPL log codes the device needs enabled to emit ADPL data (ADPLSteps.docx step 6/7):
+    //   0x11EB  LOG_DATA_PROTOCOL_LOGGING_C  ("the data itself")
+    //   0x1951  LOG_DATA_ADPL_SIO_CONFIG     (for ADPLv2+ de-mux/reconstruct)
+    // Both are equipment-ID 1. The mask bit index is the log-item number (code & 0xFFF),
+    // LSB-first within each byte.
+    static constexpr uint8_t kEquip = 1;
+    static const uint16_t kDplLogCodes[] = { 0x11EB, 0x1951 };
+
+    auto is_equip1_setmask = [](const ByteBuffer& c) {
+        if (c.size() < 16 || c[0] != DiagCmd::LOG_CONFIG) return false;
+        uint32_t op    = c[4] | (c[5] << 8) | (c[6] << 16) | (uint32_t(c[7]) << 24);
+        uint32_t equip = c[8] | (c[9] << 8) | (c[10] << 16) | (uint32_t(c[11]) << 24);
+        return op == LogConfigOp::SET_MASK && equip == kEquip;
+    };
+
+    ByteBuffer* target = nullptr;
+    for (auto& c : cfg_commands_) {
+        if (is_equip1_setmask(c)) { target = &c; break; }
+    }
+
+    if (!target) {
+        // No equip-1 mask in the .cfg — build one covering just the DPL codes.
+        uint32_t max_item = 0;
+        for (uint16_t code : kDplLogCodes)
+            max_item = std::max<uint32_t>(max_item, code & 0x0FFF);
+        uint32_t last_item = max_item + 1;
+        std::vector<uint8_t> mask((last_item + 7) / 8, 0);
+        for (uint16_t code : kDplLogCodes) {
+            uint32_t item = code & 0x0FFF;
+            mask[item / 8] |= static_cast<uint8_t>(1u << (item % 8));
+        }
+        cfg_commands_.push_back(build_log_config_set_mask(kEquip, last_item, mask));
+        verbose_log("ADPL: added equip-1 log mask for DPL codes 0x11EB, 0x1951");
+        return;
+    }
+
+    // Merge the DPL bits into the existing equip-1 mask.
+    ByteBuffer& c = *target;
+    uint32_t last_item = c[12] | (c[13] << 8) | (c[14] << 16) | (uint32_t(c[15]) << 24);
+    for (uint16_t code : kDplLogCodes) {
+        uint32_t item = code & 0x0FFF;
+        if (item >= last_item) {
+            last_item = item + 1;
+            c[12] = static_cast<uint8_t>(last_item & 0xFF);
+            c[13] = static_cast<uint8_t>((last_item >> 8) & 0xFF);
+            c[14] = static_cast<uint8_t>((last_item >> 16) & 0xFF);
+            c[15] = static_cast<uint8_t>((last_item >> 24) & 0xFF);
+        }
+        size_t need_bytes = (last_item + 7) / 8;
+        if (16 + need_bytes > c.size()) {
+            c.resize(16 + need_bytes, 0);
+        }
+        c[16 + item / 8] |= static_cast<uint8_t>(1u << (item % 8));
+    }
+    verbose_log("ADPL: enabled DPL log codes 0x11EB, 0x1951 in equip-1 mask");
 }
 
 bool DiagLogger::send_cfg_commands() {
@@ -1019,21 +1489,9 @@ bool DiagLogger::send_cfg_commands() {
 void DiagLogger::rx_loop() {
     static constexpr size_t RX_LOOP_BUFFER_SIZE = 128 * 1024;  // Match USB read size
     std::vector<uint8_t> buf(RX_LOOP_BUFFER_SIZE);
-    auto start_time = std::chrono::steady_clock::now();
 
     while (running_.load()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
-
-        // Check duration limit
-        if (config_.duration_seconds > 0) {
-            auto elapsed = std::chrono::steady_clock::now() - start_time;
-            auto elapsed_s = std::chrono::duration_cast<std::chrono::seconds>(elapsed).count();
-            if (elapsed_s >= config_.duration_seconds) {
-                CFLOG_INFO("\nDuration limit reached (" + std::to_string(config_.duration_seconds) + "s)", true);
-                running_.store(false);
-                break;
-            }
-        }
 
         // Read from ring buffer (filled by rx_worker from USB)
         size_t n = transport_->read(buf.data(), buf.size(), 100);
@@ -1053,32 +1511,37 @@ void DiagLogger::rx_loop() {
                     std::chrono::steady_clock::now() - rx_time).count();
                 if (idle_ms >= POLL_IDLE_TIMEOUT_MS) {
                     verbose_log("No RX for " + std::to_string(idle_ms)
-                                + " ms — requesting poll");
+                                + " ms - requesting poll");
                     poll_requested_.store(true);
                     tx_cv_.notify_one();
                 }
             }
 
-            // Check if device disconnected — signal transport thread once
+            // Check if device disconnected - signal transport thread once
             if (transport_->is_disconnected()) {
+                std::lock_guard<std::mutex> lock(transport_mutex_);
                 if (config_.enable_recovery) {
-                    std::lock_guard<std::mutex> lock(transport_mutex_);
                     if (!recovery_requested_) {
                         CFLOG_WARNING("\nDevice disconnected, signalling recovery...", true);
                         recovery_requested_ = true;
                         transport_cv_.notify_one();
                     }
-                } else {
+                } else if (!transport_close_requested_) {
+                    // Recovery disabled: stop the loops and ask the transport thread
+                    // to close the port. Clearing running_ here (rather than only
+                    // after the close) keeps this loop from issuing another read
+                    // against a port that is about to be torn down. stop() is not
+                    // gated on running_, so the graceful teardown still runs.
                     CFLOG_ERROR("\nDevice disconnected (recovery disabled).", true);
                     running_.store(false);
-                    break;
+                    transport_close_requested_ = true;
+                    transport_cv_.notify_one();
                 }
             }
             continue;
         }
 
         // Write raw wire-format bytes to ptrace BEFORE decoding.
-        // PortTraceReader::storeDiagCommand() does HDLC/NonHDLC decoding internally.
         ptrace_.write_record(Direction::RX, buf.data(), n);
 
         // Feed to the active decoder
@@ -1152,10 +1615,25 @@ void DiagLogger::dispatcher_loop() {
             continue;
         }
 
+        // QShrink4 FILE_READ delayed responses arrive unpaired as SUBSYS_V2
+        // (0x80) DIAG_SERV (0x12) frames. Route them to the download thread.
+        if (qshrink_capturing_.load() && frame.size() >= 12 &&
+            frame[0] == DiagCmd::SUBSYS_V2 && frame[1] == SubsysId::DIAG_SERV) {
+            {
+                std::lock_guard<std::mutex> lock(qshrink_rx_mutex_);
+                qshrink_rx_queue_.push(frame);
+            }
+            qshrink_rx_cv_.notify_one();
+            ++stats_.rx_packets;
+            stats_.rx_bytes += frame.size();
+            continue;
+        }
+
         // Async packet (log / event / message / qtrace / qmetric). Raw bytes are
         // already in ptrace (written by rx_loop); here we only update stats.
         ++stats_.rx_packets;
         stats_.rx_bytes += frame.size();
+
         if (config_.verbose && !frame.empty()) {
             std::ostringstream ss;
             ss << "  RX async: cmd=0x" << std::hex << std::setfill('0') << std::setw(2)
@@ -1214,4 +1692,4 @@ void DiagLogger::verbose_log(const std::string& msg) {
     }
 }
 
-} // namespace diaglogger
+} // namespace QC

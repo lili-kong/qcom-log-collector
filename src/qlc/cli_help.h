@@ -3,18 +3,18 @@
 //
 // Auto-generated help text from CLI argument definitions.
 
-#ifndef DIAGLOGGER_CLI_HELP_H
-#define DIAGLOGGER_CLI_HELP_H
+#ifndef QC_CLI_HELP_H
+#define QC_CLI_HELP_H
 
 #include <string>
 
-namespace diaglogger {
+namespace QC {
 
 class CliHelp {
 public:
     static std::string generate_help(const std::string& prog_name);
 };
 
-} // namespace diaglogger
+} // namespace QC
 
-#endif // DIAGLOGGER_CLI_HELP_H
+#endif // QC_CLI_HELP_H

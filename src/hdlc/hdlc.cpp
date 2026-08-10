@@ -1,12 +1,13 @@
 // Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 // SPDX-License-Identifier: BSD 3-Clause Clear License
 
-#include "hdlc.h"
-#include "crc16.h"
 #include <KL/Macros.h>
 #include <sstream>
 
-namespace diaglogger {
+#include "hdlc.h"
+#include "crc16.h"
+
+namespace QC {
 
 ByteBuffer hdlc_encode(const uint8_t* data, size_t len) {
     // Compute CRC over the raw payload
@@ -122,4 +123,4 @@ std::optional<ByteBuffer> HdlcDecoder::next_frame() {
     return frame;
 }
 
-} // namespace diaglogger
+} // namespace QC

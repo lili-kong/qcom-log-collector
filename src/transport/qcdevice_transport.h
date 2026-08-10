@@ -10,10 +10,8 @@
 //   - QcDevice::SendToDevice for writes (with retry loop)
 //   - CancelIoEx + QcDevice::CloseDevice for closing
 
-#ifndef DIAGLOGGER_QCDEVICE_TRANSPORT_H
-#define DIAGLOGGER_QCDEVICE_TRANSPORT_H
-
-#include "transport.h"
+#ifndef QC_QCDEVICE_TRANSPORT_H
+#define QC_QCDEVICE_TRANSPORT_H
 
 #include <atomic>
 #include <condition_variable>
@@ -28,14 +26,24 @@
 typedef long int HANDLE;
 #endif
 
-namespace diaglogger {
+#include "transport.h"
+
+namespace QC {
 
 class QcDeviceTransport : public Transport {
 public:
     /// Construct with a QcDevice device name (the DevDesc string from
     /// QcDevice::GetDeviceList) and optional baud rate.
+    ///
+    /// usb_stream is an optional stream suffix appended to the device name at
+    /// open time for interfaces whose USB driver requires selecting a stream
+    /// (e.g. "\\TRACE" for QDSS, "\\DPL" for ADPL).  It is deliberately kept
+    /// separate from device_name_ so device discovery/matching still works
+    /// against the bare DevDesc.  Matches TUF's Usb::setUsbStream
+    /// (Device/Communication/Usb.cpp), which opens m_description + m_stream.
     explicit QcDeviceTransport(const std::string& device_name,
-                               uint32_t baud_rate = 38400);
+                               uint32_t baud_rate = 38400,
+                               const std::string& usb_stream = std::string());
     ~QcDeviceTransport() override;
 
     // Non-copyable
@@ -59,6 +67,7 @@ private:
     static constexpr int    MAX_SEND_RETRY = 5;
 
     std::string device_name_;
+    std::string usb_stream_;
     uint32_t baud_rate_;
 
 #ifdef TOOLS_TARGET_WINDOWS
@@ -94,6 +103,6 @@ private:
     void close_handle();
 };
 
-} // namespace diaglogger
+} // namespace QC
 
-#endif // DIAGLOGGER_QCDEVICE_TRANSPORT_H
+#endif // QC_QCDEVICE_TRANSPORT_H

@@ -1,4 +1,3 @@
-# SPDX-License-Identifier: Apache-2.0
 # Shared compiler warning flags for qualcomm-log-collector
 
 function(set_compiler_warnings target)

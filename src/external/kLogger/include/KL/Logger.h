@@ -36,14 +36,14 @@
 // -----------------------------------------------------------------------------
 
 #if defined(_WIN32) || defined(_WIN64)
-#define LOG_DIR "C:\\ProgramData\\QFS\\DiagLogger\\DebugLogs\\"
-#define PTRACE_DIR "C:\\ProgramData\\QFS\\DiagLogger\\PTraceLogs\\"
-#define TMP_DIR "C:\\ProgramData\\QFS\\DiagLogger\\Temp\\"
+#define LOG_DIR "C:\\ProgramData\\QFS\\QLC\\DebugLogs\\"
+#define PTRACE_DIR "C:\\ProgramData\\QFS\\QLC\\PTraceLogs\\"
+#define TMP_DIR "C:\\ProgramData\\QFS\\QLC\\Temp\\"
 
 #else
-#define LOG_DIR "/var/tmp/QFS/DiagLogger/DebugLogs/"
-#define PTRACE_DIR "/var/tmp/QFS/DiagLogger/PTraceLogs/"
-#define TMP_DIR "/var/tmp/QFS/DiagLogger/Temp/"
+#define LOG_DIR "/var/tmp/QFS/QLC/DebugLogs/"
+#define PTRACE_DIR "/var/tmp/QFS/QLC/PTraceLogs/"
+#define TMP_DIR "/var/tmp/QFS/QLC/Temp/"
 
 #endif
 
@@ -344,6 +344,9 @@ public:
       mPtraceHeaders = headers;
       mPtraceHeadersInitialized = true;
    }
+
+   /// @brief Full path of the current (latest) ptrace/.diag output file, or empty if none.
+   std::string get_current_ptrace_file() const { return mCurrentPtraceFilePath; }
 
 private:
    /// Private constructor - initializes member variables
@@ -825,7 +828,7 @@ private:
          std::snprintf(
             filename,
             sizeof(filename),
-            "qlc_%02d_%02d_%04d_%02d_%02d_%02d_%03d_%s_PID_%d_START_1.ptrace",
+            "qlc_%02d_%02d_%04d_%02d_%02d_%02d_%03d_%s_PID_%d_START_1.diag",
             tm_val.tm_mday,
             tm_val.tm_mon + 1,
             tm_val.tm_year + 1900,
@@ -841,7 +844,7 @@ private:
          std::snprintf(
             filename,
             sizeof(filename),
-            "qlc_%02d_%02d_%04d_%02d_%02d_%02d_%03d_%s_PID_%d_%zu.ptrace",
+            "qlc_%02d_%02d_%04d_%02d_%02d_%02d_%03d_%s_PID_%d_%zu.diag",
             tm_val.tm_mday,
             tm_val.tm_mon + 1,
             tm_val.tm_year + 1900,
@@ -856,6 +859,7 @@ private:
       }
 
       const std::filesystem::path fullPath = mPtraceDirectory / filename;
+      mCurrentPtraceFilePath = fullPath.string();
       mPtraceStream.open(fullPath, std::ios::out | std::ios::app);
 
       if(!mPtraceStream.is_open())
@@ -898,6 +902,7 @@ private:
    size_t mFileSequence{0};
 
    // Ptrace log file tracking
+   std::string mCurrentPtraceFilePath;  // full path of the current (latest) ptrace/.diag file
    std::ofstream mPtraceStream;
    std::filesystem::path mPtraceDirectory;
    size_t mPtraceLineCount{0};

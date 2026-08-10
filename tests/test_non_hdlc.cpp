@@ -3,13 +3,14 @@
 //
 // Unit tests for Non-HDLC encoder/decoder and Non-HDLC switch commands.
 
-#include "hdlc/non_hdlc.h"
-#include "diag/handshake_commands.h"
 #include <cassert>
-#include <iostream>
 #include <cstring>
+#include <iostream>
 
-using namespace diaglogger;
+#include "diag/handshake_commands.h"
+#include "hdlc/non_hdlc.h"
+
+using namespace QC;
 
 static int tests_passed = 0;
 static int tests_failed = 0;

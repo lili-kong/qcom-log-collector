@@ -3,12 +3,16 @@
 //
 // Abstract transport interface for device communication.
 
-#ifndef DIAGLOGGER_TRANSPORT_H
-#define DIAGLOGGER_TRANSPORT_H
+#ifndef QC_TRANSPORT_H
+#define QC_TRANSPORT_H
+
+#include <cstddef>
+#include <cstdint>
+#include <string>
 
 #include "diaglogger/types.h"
 
-namespace diaglogger {
+namespace QC {
 
 /// Abstract transport interface.
 class Transport {
@@ -43,6 +47,6 @@ protected:
     bool verbose_ = false;
 };
 
-} // namespace diaglogger
+} // namespace QC
 
-#endif // DIAGLOGGER_TRANSPORT_H
+#endif // QC_TRANSPORT_H

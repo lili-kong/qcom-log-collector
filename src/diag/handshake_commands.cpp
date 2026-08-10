@@ -1,12 +1,13 @@
 // Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 // SPDX-License-Identifier: BSD 3-Clause Clear License
 
-#include "handshake_commands.h"
-#include "commands.h"
 #include <cstring>
 #include <KL/Macros.h>
 
-namespace diaglogger {
+#include "handshake_commands.h"
+#include "commands.h"
+
+namespace QC {
 
 // --- Command builders ---
 
@@ -65,19 +66,122 @@ ByteBuffer build_qshrink_file_list(uint16_t peripheral_subcmd, uint16_t version)
         static_cast<uint8_t>((version >> 8) & 0xFF),
         0x00, 0x00  // operation = FILE_LIST (0)
     };
-    return build_subsystem_command(SubsysId::DIAG_SERV, peripheral_subcmd, payload);
+    return build_subsystem_v2_command(SubsysId::DIAG_SERV, peripheral_subcmd, payload);
 }
 
 const std::vector<QshrinkPeripheral>& get_qshrink_peripherals() {
     static const std::vector<QshrinkPeripheral> peripherals = {
-        { HandshakeCmd::QSR4_FILE_LIST_APPS,  "apps"  },
-        { HandshakeCmd::QSR4_FILE_LIST_MPSS,  "modem" },
-        { HandshakeCmd::QSR4_FILE_LIST_ADSP,  "adsp"  },
-        { HandshakeCmd::QSR4_FILE_LIST_WCNSS, "wcnss" },
-        { HandshakeCmd::QSR4_FILE_LIST_SLPI,  "slpi"  },
-        { HandshakeCmd::QSR4_FILE_LIST_CDSP,  "cdsp"  },
+        { HandshakeCmd::QSR4_FILE_LIST_APPS,  "apps",  "APSS"  },
+        { HandshakeCmd::QSR4_FILE_LIST_MPSS,  "modem", "MPSS"  },
+        { HandshakeCmd::QSR4_FILE_LIST_ADSP,  "adsp",  "ADSP"  },
+        { HandshakeCmd::QSR4_FILE_LIST_WCNSS, "wcnss", "WCNSS" },
+        { HandshakeCmd::QSR4_FILE_LIST_SLPI,  "slpi",  "SLPI"  },
+        { HandshakeCmd::QSR4_FILE_LIST_CDSP,  "cdsp",  "CDSP"  },
     };
     return peripherals;
+}
+
+std::string qshrink_component_label(uint16_t peripheral_subcmd) {
+    for (const auto& p : get_qshrink_peripherals()) {
+        if (p.subcmd == peripheral_subcmd) {
+            return std::string(p.acronym) + " (" + p.name + ")";
+        }
+    }
+    return "subcmd=" + std::to_string(peripheral_subcmd);
+}
+
+namespace {
+void put_u16_le(ByteBuffer& b, uint16_t v) {
+    b.push_back(static_cast<uint8_t>(v & 0xFF));
+    b.push_back(static_cast<uint8_t>((v >> 8) & 0xFF));
+}
+void put_u32_le(ByteBuffer& b, uint32_t v) {
+    b.push_back(static_cast<uint8_t>(v & 0xFF));
+    b.push_back(static_cast<uint8_t>((v >> 8) & 0xFF));
+    b.push_back(static_cast<uint8_t>((v >> 16) & 0xFF));
+    b.push_back(static_cast<uint8_t>((v >> 24) & 0xFF));
+}
+} // namespace
+
+ByteBuffer build_qshrink_file_open(uint16_t peripheral_subcmd, uint16_t version,
+                                   const std::array<uint8_t, 16>& guid) {
+    ByteBuffer payload;
+    put_u16_le(payload, version);
+    put_u16_le(payload, HandshakeCmd::QSR4_OP_FILE_OPEN);
+    payload.insert(payload.end(), guid.begin(), guid.end());
+    return build_subsystem_v2_command(SubsysId::DIAG_SERV, peripheral_subcmd, payload);
+}
+
+ByteBuffer build_qshrink_file_read(uint16_t peripheral_subcmd, uint16_t version,
+                                   uint16_t fd, uint32_t length, uint32_t offset) {
+    ByteBuffer payload;
+    put_u16_le(payload, version);
+    put_u16_le(payload, HandshakeCmd::QSR4_OP_FILE_READ);
+    put_u16_le(payload, fd);
+    put_u32_le(payload, length);
+    put_u32_le(payload, offset);
+    return build_subsystem_v2_command(SubsysId::DIAG_SERV, peripheral_subcmd, payload);
+}
+
+ByteBuffer build_qshrink_file_close(uint16_t peripheral_subcmd, uint16_t version, uint16_t fd) {
+    ByteBuffer payload;
+    put_u16_le(payload, version);
+    put_u16_le(payload, HandshakeCmd::QSR4_OP_FILE_CLOSE);
+    put_u16_le(payload, fd);
+    return build_subsystem_v2_command(SubsysId::DIAG_SERV, peripheral_subcmd, payload);
+}
+
+QshrinkFileOpenResult parse_qshrink_file_open_response(const ByteBuffer& response) {
+    QshrinkFileOpenResult result;
+    // Op payload at QSR4_V2_OP_OFFSET: [guid:16][fd:2 LE][status:1] = 19 bytes.
+    constexpr size_t off = QSR4_V2_OP_OFFSET;
+    if (response.size() < off + 19) return result;
+    if (response[0] != DiagCmd::SUBSYS_V2) return result;
+    result.file_descriptor = static_cast<uint16_t>(response[off + 16])
+                           | (static_cast<uint16_t>(response[off + 17]) << 8);
+    result.status = response[off + 18];
+    result.valid = true;
+    return result;
+}
+
+QshrinkFileReadResult parse_qshrink_file_read_response(const ByteBuffer& response) {
+    QshrinkFileReadResult result;
+    // Op payload at QSR4_V2_OP_OFFSET: [fd:2][offset:4 LE][numBytes:4 LE][status:1][data...].
+    constexpr size_t off = QSR4_V2_OP_OFFSET;
+    if (response.size() < off + 11) return result;
+    if (response[0] != DiagCmd::SUBSYS_V2) return result;
+
+    result.offset = static_cast<uint32_t>(response[off + 2])
+                  | (static_cast<uint32_t>(response[off + 3]) << 8)
+                  | (static_cast<uint32_t>(response[off + 4]) << 16)
+                  | (static_cast<uint32_t>(response[off + 5]) << 24);
+    result.num_bytes = static_cast<uint32_t>(response[off + 6])
+                     | (static_cast<uint32_t>(response[off + 7]) << 8)
+                     | (static_cast<uint32_t>(response[off + 8]) << 16)
+                     | (static_cast<uint32_t>(response[off + 9]) << 24);
+    result.status = response[off + 10];
+    result.valid = true;
+
+    const size_t data_start = off + 11;                 // == 27
+    const size_t available = response.size() - data_start;
+    const size_t n = (result.num_bytes < available) ? result.num_bytes : available;
+    result.data.assign(response.begin() + data_start, response.begin() + data_start + n);
+    return result;
+}
+
+SubsysV2Header parse_subsys_v2_header(const ByteBuffer& r) {
+    SubsysV2Header h;
+    if (r.size() < 12 || r[0] != DiagCmd::SUBSYS_V2) return h;
+    h.subsys_id = r[1];
+    h.command = static_cast<uint16_t>(r[2]) | (static_cast<uint16_t>(r[3]) << 8);
+    h.status = static_cast<uint32_t>(r[4]) | (static_cast<uint32_t>(r[5]) << 8)
+             | (static_cast<uint32_t>(r[6]) << 16) | (static_cast<uint32_t>(r[7]) << 24);
+    h.response_id = static_cast<uint16_t>(r[8]) | (static_cast<uint16_t>(r[9]) << 8);
+    uint16_t idx_more = static_cast<uint16_t>(r[10]) | (static_cast<uint16_t>(r[11]) << 8);
+    h.response_index = idx_more & 0x7FFF;
+    h.more_responses = (idx_more & 0x8000) != 0;
+    h.valid = true;
+    return h;
 }
 
 // --- Response parsers ---
@@ -186,30 +290,48 @@ DiagIdTableResult parse_diagid_table_response(const ByteBuffer& payload) {
     return result;
 }
 
-QshrinkFileListResult parse_qshrink_file_list(const ByteBuffer& payload) {
+QshrinkFileListResult parse_qshrink_file_list(const ByteBuffer& response, uint16_t requested_version) {
     QshrinkFileListResult result;
 
-    // Minimum: [1] status, [1] num_files
-    if (payload.size() < 2) return result;
+    // Full SUBSYS_V2 response: [version:2][op:2] at QSR4_V2_OP_OFFSET-4, then the
+    // op payload ([status][numFiles]...) at QSR4_V2_OP_OFFSET.
+    constexpr size_t off = QSR4_V2_OP_OFFSET;
+    if (response.size() < off + 2) return result;
+    if (response[0] != DiagCmd::SUBSYS_V2) return result;
 
-    result.status = payload[0];
-    uint8_t num_files = payload[1];
+    // Parse with the version the DEVICE ECHOED (bytes off-4..off-3), not the version
+    // we requested — the device may answer at a downgraded version, and the FILE_LIST
+    // entry stride depends on it. Matches TUF's onHandleSubsysV2DiagResp, which parses
+    // with pImmediateRsp->getVersion() / pDelayedRsp->getVersion().
+    uint16_t version = requested_version;
+    if constexpr (off >= 4) {
+        version = static_cast<uint16_t>(response[off - 4])
+                | (static_cast<uint16_t>(response[off - 3]) << 8);
+    }
+    result.version = version;
+
+    result.status = response[off];
+    uint8_t num_files = response[off + 1];
     result.valid = true;
 
-    size_t offset = 2;
+    // v3 appends a 1-byte "db index" per entry (21-byte stride). v1/v2 use 20.
+    const size_t db_index_bytes = (version == 3) ? 1 : 0;
+    const size_t entry_stride = 16 + 4 + db_index_bytes;
+
+    size_t offset = off + 2;
     for (uint8_t i = 0; i < num_files; ++i) {
-        // Each entry: [16] GUID + [4] file_length
-        if (offset + 20 > payload.size()) break;
+        // Each entry: [16] GUID + [4] file_length LE (+ [1] db_index in v3)
+        if (offset + entry_stride > response.size()) break;
 
         QshrinkFileEntry entry;
-        std::copy(payload.data() + offset, payload.data() + offset + 16, entry.guid.begin());
-        offset += 16;
+        std::copy(response.data() + offset, response.data() + offset + 16, entry.guid.begin());
 
-        entry.file_length = static_cast<uint32_t>(payload[offset])
-                          | (static_cast<uint32_t>(payload[offset + 1]) << 8)
-                          | (static_cast<uint32_t>(payload[offset + 2]) << 16)
-                          | (static_cast<uint32_t>(payload[offset + 3]) << 24);
-        offset += 4;
+        entry.file_length = static_cast<uint32_t>(response[offset + 16])
+                          | (static_cast<uint32_t>(response[offset + 17]) << 8)
+                          | (static_cast<uint32_t>(response[offset + 18]) << 16)
+                          | (static_cast<uint32_t>(response[offset + 19]) << 24);
+        entry.version = version;   // stamp the echoed version for OPEN/READ/CLOSE
+        offset += entry_stride;
 
         result.files.push_back(std::move(entry));
     }
@@ -309,4 +431,4 @@ StatusResponse parse_status_response(const ByteBuffer& response) {
     return result;
 }
 
-} // namespace diaglogger
+} // namespace QC

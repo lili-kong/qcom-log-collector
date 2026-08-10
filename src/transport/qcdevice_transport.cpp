@@ -12,10 +12,6 @@
 //
 // Matches TUF's Usb.cpp pattern (Device/Communication/Usb.cpp).
 
-#include "qcdevice_transport.h"
-#include "transport_manager.h"
-#include "qdpublic.h"
-
 #include <algorithm>
 #include <chrono>
 #include <cstring>
@@ -24,6 +20,10 @@
 #include <sstream>
 #include <thread>
 #include <KL/Macros.h>
+
+#include "qcdevice_transport.h"
+#include "transport_manager.h"
+#include "qdpublic.h"
 
 // Format a hex dump of the first N bytes for diagnostic logging.
 static std::string hex_dump(const uint8_t* data, size_t len, size_t max_bytes = 32) {
@@ -38,11 +38,24 @@ static std::string hex_dump(const uint8_t* data, size_t len, size_t max_bytes = 
     return ss.str();
 }
 
-namespace diaglogger {
+// Convert a device handle to an integer for diagnostic logging. HANDLE is a
+// pointer type on Windows but an integral fd-like type on Linux, so the cast
+// required differs per platform.
+static uintptr_t handle_to_uint(HANDLE handle) {
+#ifdef TOOLS_TARGET_WINDOWS
+    return reinterpret_cast<uintptr_t>(handle);
+#else
+    return static_cast<uintptr_t>(handle);
+#endif
+}
+
+namespace QC {
 
 QcDeviceTransport::QcDeviceTransport(const std::string& device_name,
-                                     uint32_t baud_rate)
+                                     uint32_t baud_rate,
+                                     const std::string& usb_stream)
     : device_name_(device_name)
+    , usb_stream_(usb_stream)
     , baud_rate_(baud_rate)
     , ring_(RING_BUFFER_SIZE)
 {
@@ -95,7 +108,11 @@ bool QcDeviceTransport::open() {
     if (resolved != device_name_) {
         device_name_ = resolved;
     }
-    std::wstring wide_name = TransportManager::to_wide(device_name_);
+    // Append the stream suffix (if any) only for the open path.  device_name_
+    // stays the bare DevDesc so resolve_device_name / extract_com_port and the
+    // reopen-time matching above continue to work.  Mirrors TUF's
+    // Usb::open(), which opens m_description + m_stream (Usb.cpp:326).
+    std::wstring wide_name = TransportManager::to_wide(device_name_ + usb_stream_);
 
     // Check if the COM port is already in use by another process BEFORE
     // we open it.  COM ports opened with FILE_SHARE_READ|FILE_SHARE_WRITE
@@ -124,8 +141,9 @@ bool QcDeviceTransport::open() {
         const_cast<wchar_t*>(wide_name.c_str()),
         static_cast<DWORD>(baud_rate_));
 #else
+    std::string open_name = device_name_ + usb_stream_;
     handle_ = QcDevice::OpenDevice(
-        const_cast<char*>(device_name_.c_str()));
+        const_cast<char*>(open_name.c_str()));
 #endif
 
     for (int retry = 0; !is_handle_valid() && retry < OPEN_RETRY_COUNT; ++retry) {
@@ -140,19 +158,20 @@ bool QcDeviceTransport::open() {
             static_cast<DWORD>(baud_rate_));
 #else
         handle_ = QcDevice::OpenDevice(
-            const_cast<char*>(device_name_.c_str()));
+            const_cast<char*>(open_name.c_str()));
 #endif
     }
 
     if (!is_handle_valid()) {
-        CFLOG_ERROR("QcDevice: Failed to open device: " + device_name_, true);
+        CFLOG_ERROR("QcDevice: Failed to open device: "
+                    + device_name_ + usb_stream_, true);
         return false;
     }
 
     {
         std::ostringstream ss;
-        ss << "QcDevice: Opened device: " << device_name_
-           << " (handle=0x" << std::hex << (uintptr_t)(handle_)
+        ss << "QcDevice: Opened device: " << device_name_ << usb_stream_
+           << " (handle=0x" << std::hex << handle_to_uint(handle_)
            << std::dec << ")";
         CFLOG_INFO(ss.str(), true);
     }
@@ -354,7 +373,9 @@ bool QcDeviceTransport::reopen() {
         for (const auto& dev : devices) {
             if (dev.device_name.find(device_match_pattern_) != std::string::npos) {
                 found_match = true;
-                wide_name = TransportManager::to_wide(dev.device_name);
+                // Match on the bare DevDesc, then re-append the stream suffix
+                // for the open call (see open()).
+                wide_name = TransportManager::to_wide(dev.device_name + usb_stream_);
                 device_name_ = dev.device_name;
                 CFLOG_WARNING("QcDevice: reopen: Matched device \"" + dev.device_name + "\"", true);
                 break;
@@ -373,8 +394,9 @@ bool QcDeviceTransport::reopen() {
         const_cast<wchar_t*>(wide_name.c_str()),
         static_cast<DWORD>(baud_rate_));
 #else
+    std::string open_name = device_name_ + usb_stream_;
     handle_ = QcDevice::OpenDevice(
-        const_cast<char*>(device_name_.c_str()));
+        const_cast<char*>(open_name.c_str()));
     bool found_match = is_handle_valid();
 #endif
 
@@ -389,7 +411,7 @@ bool QcDeviceTransport::reopen() {
             static_cast<DWORD>(baud_rate_));
 #else
         handle_ = QcDevice::OpenDevice(
-            const_cast<char*>(device_name_.c_str()));
+            const_cast<char*>(open_name.c_str()));
 #endif
     }
 
@@ -401,7 +423,7 @@ bool QcDeviceTransport::reopen() {
     {
         std::ostringstream ss;
         ss << "QcDevice: reopen: Opened device: " << device_name_
-           << " (handle=0x" << std::hex << (uintptr_t)(handle_)
+           << " (handle=0x" << std::hex << handle_to_uint(handle_)
            << std::dec << ")";
         CFLOG_INFO(ss.str(), true);
     }
@@ -424,7 +446,7 @@ void QcDeviceTransport::rx_worker_func() {
     {
         std::ostringstream ss;
         ss << "QcDevice: RX worker started (handle=0x"
-           << std::hex << (uintptr_t)(handle_)
+           << std::hex << handle_to_uint(handle_)
            << std::dec << ")";
         FLOG_DEBUG(ss.str());
     }
@@ -446,11 +468,14 @@ void QcDeviceTransport::rx_worker_func() {
         ++iteration;
 
         if (!ok) {
-            CFLOG_ERROR("QcDevice: ReadFromDevice FAILED at iteration "
-                      + std::to_string(iteration) + " (total_rx=" + std::to_string(total_bytes_received)
-                      + " zero_reads=" + std::to_string(zero_count) + "), device disconnected", true);
+            if (state_.load() == TransportState::CONNECTED) {
+                // Only log error if this was an unexpected disconnect (not intentional shutdown)
+                CFLOG_ERROR("QcDevice: ReadFromDevice FAILED at iteration "
+                          + std::to_string(iteration) + " (total_rx=" + std::to_string(total_bytes_received)
+                          + " zero_reads=" + std::to_string(zero_count) + "), device disconnected", true);
+                state_.store(TransportState::DISCONNECTED);
+            }
             close_handle();
-            state_.store(TransportState::DISCONNECTED);
             ring_cv_.notify_all();
             break;
         }
@@ -480,4 +505,4 @@ void QcDeviceTransport::rx_worker_func() {
               + " zero_reads=" + std::to_string(zero_count) + ")");
 }
 
-} // namespace diaglogger
+} // namespace QC

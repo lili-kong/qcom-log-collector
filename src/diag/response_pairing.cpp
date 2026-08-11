@@ -3,7 +3,7 @@
 
 #include "diag/response_pairing.h"
 
-namespace diaglogger {
+namespace QC {
 
 ByteBuffer compute_response_signature(const ByteBuffer& request_payload) {
     if (request_payload.empty()) {
@@ -60,4 +60,4 @@ bool is_error_response(const ByteBuffer& frame) {
     return is_error_cmd(frame[0]);
 }
 
-} // namespace diaglogger
+} // namespace QC

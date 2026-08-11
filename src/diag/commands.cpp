@@ -1,11 +1,12 @@
 // Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 // SPDX-License-Identifier: BSD 3-Clause Clear License
 
-#include "commands.h"
-#include "subsystem_commands.h"
 #include <cstring>
 
-namespace diaglogger {
+#include "commands.h"
+#include "subsystem_commands.h"
+
+namespace QC {
 
 // Helper to append a little-endian uint32 to a buffer
 static void append_u32(ByteBuffer& buf, uint32_t val) {
@@ -63,6 +64,21 @@ std::vector<ByteBuffer> build_log_config_disable_all() {
     return commands;
 }
 
+ByteBuffer build_log_config_set_mask(uint8_t equip_id, uint32_t last_item,
+                                     const std::vector<uint8_t>& mask) {
+    // LOG_CONFIG SET_MASK: [0x73][00 00 00][op=3][equip_id][last_item][mask bytes]
+    ByteBuffer pkt;
+    pkt.push_back(DiagCmd::LOG_CONFIG);
+    pkt.push_back(0x00);
+    pkt.push_back(0x00);
+    pkt.push_back(0x00);
+    append_u32(pkt, LogConfigOp::SET_MASK);
+    append_u32(pkt, static_cast<uint32_t>(equip_id));
+    append_u32(pkt, last_item);
+    pkt.insert(pkt.end(), mask.begin(), mask.end());
+    return pkt;
+}
+
 ByteBuffer build_event_report(bool enable) {
     // EVENT_RPT packet: cmd_id + enable flag
     ByteBuffer pkt;
@@ -73,7 +89,6 @@ ByteBuffer build_event_report(bool enable) {
 
 ByteBuffer build_set_event_mask_disable(uint16_t num_bits) {
     // SET_EVENT_MASK (0x82) with all-zero mask.
-    // Matches TUF SetEventConfigRequest::createFromMask() with empty mask.
     // Format: [cmd=0x82][reserved(3)][numItems=uint16 LE][mask bytes (all zero)]
     uint16_t mask_bytes = static_cast<uint16_t>(num_bits / 8 + 1);
     ByteBuffer pkt;
@@ -90,7 +105,6 @@ ByteBuffer build_set_event_mask_disable(uint16_t num_bits) {
 
 ByteBuffer build_ext_msg_cfg_disable() {
     // EXT_MSG_CFG (0x7D) disable all debug messages.
-    // Matches TUF DebugMessageConfigRequest::createDisableAllMasksCommand().
     // Format: [cmd=0x7D][subcmd=5][reserved=0x00 0x00][mask=0x00 0x00 0x00 0x00]
     ByteBuffer pkt;
     pkt.push_back(DiagCmd::EXT_MSG_CFG);
@@ -103,7 +117,6 @@ ByteBuffer build_ext_msg_cfg_disable() {
 
 ByteBuffer build_qtrace_disable() {
     // QTrace disable: subsys=0x44 (SUBSYSTEM_LTE), cmd=0x9004, numItems=0.
-    // Matches TUF QTraceConfigMaskSetFilterRequest::clearAllMask().
     ByteBuffer payload;
     append_u32(payload, 0);  // numItems = 0 (disable all)
     return build_subsystem_command(QTraceCmd::SUBSYS_LTE,
@@ -112,7 +125,6 @@ ByteBuffer build_qtrace_disable() {
 
 ByteBuffer build_qshmetrics_disable() {
     // QshMetrics disable: subsys=0x44 (SUBSYSTEM_LTE), cmd=0x9002.
-    // Matches TUF QshMetricsConfigRequest::createCompleteSetFromMask() with empty mask.
     // Payload: [numArgs=4][action=FLUSH_CLEAR(2)][enable=DISABLE(0)][clientID=0][numItems=0]
     ByteBuffer payload;
     append_u32(payload, 4);  // numArgs = MIN_NUM_ARGUMENTS
@@ -130,8 +142,10 @@ bool parse_poll_response(const ByteBuffer& response) {
 }
 
 bool is_valid_response(const ByteBuffer& response, uint8_t expected_cmd) {
-    if (response.empty()) return false;
+    if (response.empty()) {
+        return false;
+    }
     return response[0] == expected_cmd;
 }
 
-} // namespace diaglogger
+} // namespace QC

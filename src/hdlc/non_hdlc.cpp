@@ -3,7 +3,7 @@
 
 #include "non_hdlc.h"
 
-namespace diaglogger {
+namespace QC {
 
 ByteBuffer non_hdlc_encode(const uint8_t* data, size_t len) {
     // Frame format: [0x7E][version=0x01][len_lo][len_hi][payload...][0x7E]
@@ -119,4 +119,4 @@ void NonHdlcDecoder::reset() {
     // Don't reset error count — it's cumulative
 }
 
-} // namespace diaglogger
+} // namespace QC

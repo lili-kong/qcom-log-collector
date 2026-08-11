@@ -2,14 +2,14 @@
 <!-- Shared property sheet for test projects: compiles all library sources into each test executable -->
 <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <PropertyGroup Condition="'$(Platform)'=='Win32'">
-    <LibusbLibDir>$(SolutionDir)src\qcdevice\libusb\lib-1.0.27\lib\x86\release</LibusbLibDir>
+    <LibusbLibDir>$(SolutionDir)src\qds\libusb\lib-1.0.27\lib\x86\release</LibusbLibDir>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Platform)'=='x64'">
-    <LibusbLibDir>$(SolutionDir)src\qcdevice\libusb\lib-1.0.27\lib\x64\release</LibusbLibDir>
+    <LibusbLibDir>$(SolutionDir)src\qds\libusb\lib-1.0.27\lib\x64\release</LibusbLibDir>
   </PropertyGroup>
   <ItemDefinitionGroup>
     <ClCompile>
-      <AdditionalIncludeDirectories>$(SolutionDir)include;$(SolutionDir)src;$(SolutionDir)src\qcdevice\QDS_WIN;$(SolutionDir)src\qcdevice\common;$(SolutionDir)src\qcdevice\libusb\source;$(SolutionDir)src\qcdevice\libusb\lib-1.0.27\include;$(SolutionDir)src\qcdevice\qds_lnx\inc;$(SolutionDir)src\external\kLogger\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(SolutionDir)include;$(SolutionDir)src;$(SolutionDir)src\qds\QDS_WIN;$(SolutionDir)src\qds\common;$(SolutionDir)src\qds\libusb\source;$(SolutionDir)src\qds\libusb\lib-1.0.27\include;$(SolutionDir)src\qds\qds_lnx\inc;$(SolutionDir)src\external\kLogger\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PreprocessorDefinitions>TOOLS_TARGET_WINDOWS=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
     <Link>
@@ -32,39 +32,42 @@
     <ClCompile Include="$(SolutionDir)src\transport\transport_manager.cpp" />
     <ClCompile Include="$(SolutionDir)src\transport\qcdevice_transport.cpp" />
     <ClCompile Include="$(SolutionDir)src\transport\transport_factory.cpp" />
-    <!-- Ptrace sources -->
-    <ClCompile Include="$(SolutionDir)src\ptrace\ptrace_writer.cpp" />
+    <!-- File writer sources -->
+    <ClCompile Include="$(SolutionDir)src\file_writer\ptrace_writer.cpp" />
+    <ClCompile Include="$(SolutionDir)src\file_writer\binary_writer.cpp" />
+    <ClCompile Include="$(SolutionDir)src\file_writer\qlc_writer.cpp" />
     <!-- Logger sources -->
     <ClCompile Include="$(SolutionDir)src\logger\diag_logger.cpp" />
-    <!-- QLC sources -->
-    <ClCompile Include="$(SolutionDir)src\qlc\qlc_writer.cpp" />
+    <!-- QDSS sources -->
+    <ClCompile Include="$(SolutionDir)src\logger\qdss\qdss.cpp" />
+    <ClCompile Include="$(SolutionDir)src\logger\qdss\qdss_diag_manager.cpp" />
     <!-- QcDevice: Windows sources -->
-    <ClCompile Include="$(SolutionDir)src\qcdevice\QDS_WIN\scandev.cpp">
+    <ClCompile Include="$(SolutionDir)src\qds\QDS_WIN\scandev.cpp">
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <ConformanceMode>false</ConformanceMode>
       <SDLCheck>false</SDLCheck>
     </ClCompile>
-    <ClCompile Include="$(SolutionDir)src\qcdevice\QDS_WIN\QdIoQmi.cpp">
+    <ClCompile Include="$(SolutionDir)src\qds\QDS_WIN\QdIoQmi.cpp">
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <ConformanceMode>false</ConformanceMode>
       <SDLCheck>false</SDLCheck>
     </ClCompile>
-    <ClCompile Include="$(SolutionDir)src\qcdevice\libusb\source\qcom-libusb.cpp">
+    <ClCompile Include="$(SolutionDir)src\qds\libusb\source\qcom-libusb.cpp">
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <ConformanceMode>false</ConformanceMode>
       <SDLCheck>false</SDLCheck>
     </ClCompile>
-    <ClCompile Include="$(SolutionDir)src\qcdevice\libusb\source\libusb-dynamic-loader.cpp">
+    <ClCompile Include="$(SolutionDir)src\qds\libusb\source\libusb-dynamic-loader.cpp">
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <ConformanceMode>false</ConformanceMode>
       <SDLCheck>false</SDLCheck>
     </ClCompile>
-    <ClCompile Include="$(SolutionDir)src\qcdevice\common\utils.cpp">
+    <ClCompile Include="$(SolutionDir)src\qds\common\utils.cpp">
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <ConformanceMode>false</ConformanceMode>
       <SDLCheck>false</SDLCheck>
     </ClCompile>
-    <ClCompile Include="$(SolutionDir)src\qcdevice\common\qdver.cpp">
+    <ClCompile Include="$(SolutionDir)src\qds\common\qdver.cpp">
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <ConformanceMode>false</ConformanceMode>
       <SDLCheck>false</SDLCheck>

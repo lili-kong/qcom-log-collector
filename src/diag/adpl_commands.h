@@ -5,13 +5,16 @@
 // All configuration commands are sent over the existing diag serial connection.
 // ADPL data flows back on the same diag connection.
 
-#ifndef DIAGLOGGER_ADPL_COMMANDS_H
-#define DIAGLOGGER_ADPL_COMMANDS_H
+#ifndef QC_ADPL_COMMANDS_H
+#define QC_ADPL_COMMANDS_H
+
+#include <cstddef>
+#include <cstdint>
 
 #include "diaglogger/types.h"
 #include "subsystem_commands.h"
 
-namespace diaglogger {
+namespace QC {
 
 // ADPL IPA subsystem command
 namespace AdplCmd {
@@ -98,6 +101,6 @@ AdplPacket decode_adpl_packet(uint8_t version, const uint8_t* data, size_t len);
 /// Returns 0 if data is too short to determine frame size.
 size_t adpl_frame_size(uint8_t version, const uint8_t* data, size_t len);
 
-} // namespace diaglogger
+} // namespace QC
 
-#endif // DIAGLOGGER_ADPL_COMMANDS_H
+#endif // QC_ADPL_COMMANDS_H

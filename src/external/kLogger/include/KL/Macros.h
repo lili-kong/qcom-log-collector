@@ -117,7 +117,7 @@
       if(KL::Logger::get_instance().enabled(KL::Level::Debug) &&                                                          \
          KL::Logger::get_instance().optionEnabled(KL::LogOption::DebugToFile))                                            \
       {                                                                                                                   \
-         KL::Logger::get_instance().log(KL::Level::Error, msg, KL::Sink::FileAndConsole, __FILE__,__LINE__, printMsgOnly); \
+         KL::Logger::get_instance().log(KL::Level::Debug, msg, KL::Sink::FileAndConsole, __FILE__,__LINE__, printMsgOnly); \
       }                                                                                                                   \
    } while(0)
 

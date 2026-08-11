@@ -5,17 +5,17 @@
 // Implements the connection handshake sequence: security keys,
 // feature query, DiagID/hypervisor setup.
 
-#ifndef DIAGLOGGER_HANDSHAKE_COMMANDS_H
-#define DIAGLOGGER_HANDSHAKE_COMMANDS_H
-
-#include "diaglogger/types.h"
-#include "subsystem_commands.h"
+#ifndef QC_HANDSHAKE_COMMANDS_H
+#define QC_HANDSHAKE_COMMANDS_H
 
 #include <array>
 #include <string>
 #include <vector>
 
-namespace diaglogger {
+#include "diaglogger/types.h"
+#include "subsystem_commands.h"
+
+namespace QC {
 
 // --- Handshake subsystem command codes (subsys=0x12, DIAG_SERV) ---
 
@@ -41,6 +41,15 @@ namespace HandshakeCmd {
     constexpr uint16_t QSR4_FILE_LIST_WCNSS = 5151;  // 0x141F
     constexpr uint16_t QSR4_FILE_LIST_SLPI  = 6680;  // 0x1A18
     constexpr uint16_t QSR4_FILE_LIST_CDSP  = 8209;  // 0x2011
+
+    // QShrink4 operations (payload word after version)
+    constexpr uint16_t QSR4_OP_FILE_LIST  = 0;
+    constexpr uint16_t QSR4_OP_FILE_OPEN  = 1;
+    constexpr uint16_t QSR4_OP_FILE_READ  = 2;
+    constexpr uint16_t QSR4_OP_FILE_CLOSE = 3;
+
+    // Default bytes per FILE_READ chunk (per TUF DEFAULT_FILE_CHUNK_SIZE).
+    constexpr uint32_t QSR4_READ_CHUNK = 4000;
 }
 
 // DiagID priority config opcodes
@@ -185,20 +194,59 @@ struct StatusResponse {
 struct QshrinkFileEntry {
     std::array<uint8_t, 16> guid{};
     uint32_t file_length = 0;
+    uint16_t peripheral_subcmd = 0;  // peripheral this file was reported by (for FILE_OPEN)
+    uint16_t version = 0;            // negotiated FILE_LIST protocol version
 };
 
 /// Result from QSR4 FILE_LIST response.
 struct QshrinkFileListResult {
     bool valid = false;
     uint8_t status = 0xFF;
+    uint16_t version = 0;          // version the device echoed in the response
     std::vector<QshrinkFileEntry> files;
     bool ok() const { return valid && status == 0; }
 };
 
+/// Result from QSR4 FILE_OPEN response.
+struct QshrinkFileOpenResult {
+    bool valid = false;
+    uint8_t status = 0xFF;         // 0 = success
+    uint16_t file_descriptor = 0;
+    bool ok() const { return valid && status == 0; }
+};
+
+/// Result from QSR4 FILE_READ response (immediate or delayed).
+struct QshrinkFileReadResult {
+    bool valid = false;
+    uint8_t status = 0xFF;         // 0 = success
+    uint32_t offset = 0;           // byte offset of this chunk within the file
+    uint32_t num_bytes = 0;        // number of file bytes in this chunk
+    ByteBuffer data;               // file bytes for this chunk
+    bool ok() const { return valid && status == 0; }
+};
+
+/// Parsed SUBSYS_V2 (0x80) response header (the 11-byte SubsystemV2Record after
+/// the 0x80 command byte). Used to sequence FILE_READ immediate/delayed responses.
+struct SubsysV2Header {
+    bool valid = false;
+    uint8_t subsys_id = 0;
+    uint16_t command = 0;          // peripheral for QShrink4
+    uint32_t status = 0;
+    uint16_t response_id = 0;      // groups delayed responses (0 = single immediate)
+    uint16_t response_index = 0;   // 0 = immediate, >=1 = delayed
+    bool more_responses = false;
+    // Mirrors Diag::SubsystemV2Record::isFinalResponse().
+    bool is_final() const { return response_id == 0 || (!more_responses && response_index >= 1); }
+};
+
+/// Parse the SUBSYS_V2 response header from a full response frame (starting at 0x80).
+SubsysV2Header parse_subsys_v2_header(const ByteBuffer& response);
+
 /// Peripheral info for QSR4 FILE_LIST iteration.
 struct QshrinkPeripheral {
     uint16_t subcmd;
-    const char* name;
+    const char* name;      // lowercase code name, e.g. "modem"
+    const char* acronym;   // subsystem acronym, e.g. "MPSS"
 };
 
 // --- Command builders ---
@@ -244,6 +292,34 @@ ByteBuffer build_qshrink_file_list(uint16_t peripheral_subcmd, uint16_t version 
 /// Get list of peripherals to query for QSR4 FILE_LIST.
 const std::vector<QshrinkPeripheral>& get_qshrink_peripherals();
 
+/// Human-readable component label for a peripheral subcmd, e.g. "MPSS (modem)".
+/// Falls back to "subcmd=<n>" for an unknown subcmd.
+std::string qshrink_component_label(uint16_t peripheral_subcmd);
+
+/// Build QSR4 FILE_OPEN request. Payload: [u16 version][u16 op=1][16B guid].
+ByteBuffer build_qshrink_file_open(uint16_t peripheral_subcmd, uint16_t version,
+                                   const std::array<uint8_t, 16>& guid);
+
+/// Build QSR4 FILE_READ request. Payload: [u16 version][u16 op=2][u16 fd][u32 length][u32 offset].
+ByteBuffer build_qshrink_file_read(uint16_t peripheral_subcmd, uint16_t version,
+                                   uint16_t fd, uint32_t length, uint32_t offset);
+
+/// Build QSR4 FILE_CLOSE request. Payload: [u16 version][u16 op=3][u16 fd].
+ByteBuffer build_qshrink_file_close(uint16_t peripheral_subcmd, uint16_t version, uint16_t fd);
+
+// Offset of the QShrink4 operation payload within a full SUBSYS_V2 response frame.
+// Layout: [0x80 cmd:1][SubsystemV2Record:11][QShrink4Command{Imm,Delayed}Response:4].
+// The op-specific payload (status/fd/data/...) begins here. (1 + 11 + 4 = 16.)
+constexpr size_t QSR4_V2_OP_OFFSET = 16;
+
+/// Parse a QSR4 FILE_OPEN response (full SUBSYS_V2 response frame, starting at 0x80).
+/// Op payload at QSR4_V2_OP_OFFSET: [guid:16][fd:2 LE][status:1].
+QshrinkFileOpenResult parse_qshrink_file_open_response(const ByteBuffer& response);
+
+/// Parse a QSR4 FILE_READ response (full SUBSYS_V2 response frame, starting at 0x80).
+/// Op payload at QSR4_V2_OP_OFFSET: [fd:2][offset:4][numBytes:4 LE][status:1][data...].
+QshrinkFileReadResult parse_qshrink_file_read_response(const ByteBuffer& response);
+
 // --- Response parsers ---
 
 /// Parse feature query response payload (after 4-byte subsystem header).
@@ -265,8 +341,10 @@ DiagIdTableResult parse_diagid_table_response(const ByteBuffer& payload);
 /// Response payload: [1] framingVersion, [1] result (0=success).
 NonHdlcSwitchResult parse_non_hdlc_switch_response(const ByteBuffer& payload);
 
-/// Parse QSR4 FILE_LIST response payload (after 4-byte subsystem header).
-QshrinkFileListResult parse_qshrink_file_list(const ByteBuffer& payload);
+/// Parse a QSR4 FILE_LIST response (full SUBSYS_V2 response frame, starting at 0x80).
+/// Op payload at QSR4_V2_OP_OFFSET: [status:1][numFiles:1]([guid:16][len:4 LE][db_index:1?])xN.
+/// version 3 appends a 1-byte "db index" field per entry (21-byte stride); v1/v2 use 20.
+QshrinkFileListResult parse_qshrink_file_list(const ByteBuffer& response, uint16_t version = 3);
 
 /// Parse VERNO (0x00) response (full response including cmd byte).
 VernoResponse parse_verno_response(const ByteBuffer& response);
@@ -280,6 +358,6 @@ EsnResponse parse_esn_response(const ByteBuffer& response);
 /// Parse STATUS (0x0C) response (full response including cmd byte).
 StatusResponse parse_status_response(const ByteBuffer& response);
 
-} // namespace diaglogger
+} // namespace QC
 
-#endif // DIAGLOGGER_HANDSHAKE_COMMANDS_H
+#endif // QC_HANDSHAKE_COMMANDS_H

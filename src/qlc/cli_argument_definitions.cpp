@@ -3,14 +3,14 @@
 
 #include "cli_argument_definitions.h"
 
-namespace diaglogger {
+namespace QC {
 
 std::map<std::string, ArgumentDefinition> CliArgumentDefinitions::argument_definitions_;
 std::vector<CommandDefinition> CliArgumentDefinitions::command_definitions_;
 bool CliArgumentDefinitions::initialized_ = false;
 
 void CliArgumentDefinitions::initialize() {
-    if (initialized_) return;
+    if (initialized_) { return; }
 
     // --- Command definitions ---
     command_definitions_ = {
@@ -26,7 +26,7 @@ void CliArgumentDefinitions::initialize() {
             "collect-log",
             "Collect diagnostic logs from a device",
             {"cfg", "device", "duration|duration-minutes|duration-hours"},
-            {"out", "baud", "verbose", "hdlc", "no-recovery", "recovery-timeout"},
+            {"out", "baud", "verbose", "hdlc", "no-recovery", "recovery-timeout", "enable-qdss", "enable-adpl"},
             "qlc --collect-log --cfg=mask.cfg --device=\"Qualcomm HS-USB\" --duration=60",
             CommandType::COLLECT_LOG
         }
@@ -49,14 +49,14 @@ void CliArgumentDefinitions::initialize() {
         }},
         {"device", {
             "device",
-            "QcDevice name (use --devices to find)",
+            "Device description (use --devices to find)",
             ArgumentType::STRING,
             ArgumentCategory::COLLECT_LOG_OPTIONS,
             "",
             true,
-            "--device=\"Qualcomm HS-USB Android DIAG 9091 (COM3)\"",
+            "--device=\"Qualcomm USB Composite Device 90DB (0003)\"",
             [](CliOptions& opts, const std::string& val) {
-                opts.port_name = val;
+                opts.device_name = val;
                 opts.has_port = true;
             }
         }},
@@ -171,6 +171,30 @@ void CliArgumentDefinitions::initialize() {
             [](CliOptions& opts, const std::string& val) {
                 opts.recovery_timeout_seconds = std::stoi(val);
             }
+        }},
+        {"enable-qdss", {
+            "enable-qdss",
+            "Enable QDSS high-speed capture to .bin file (auto-resolves QDSS port from device)",
+            ArgumentType::FLAG,
+            ArgumentCategory::COLLECT_LOG_OPTIONS,
+            "",
+            false,
+            "--enable-qdss",
+            [](CliOptions& opts, const std::string&) {
+                opts.enable_qdss = true;
+            }
+        }},
+        {"enable-adpl", {
+            "enable-adpl",
+            "Write binary ADPL file alongside ptrace (requires ADPL-enabled device)",
+            ArgumentType::FLAG,
+            ArgumentCategory::COLLECT_LOG_OPTIONS,
+            "",
+            false,
+            "--enable-adpl",
+            [](CliOptions& opts, const std::string&) {
+                opts.enable_adpl = true;
+            }
         }}
     };
 
@@ -206,4 +230,4 @@ const CommandDefinition* CliArgumentDefinitions::get_command_definition(const st
     return nullptr;
 }
 
-} // namespace diaglogger
+} // namespace QC

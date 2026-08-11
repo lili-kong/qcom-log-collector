@@ -3,12 +3,15 @@
 //
 // Diag command IDs and packet builders for Qualcomm diagnostic protocol.
 
-#ifndef DIAGLOGGER_COMMANDS_H
-#define DIAGLOGGER_COMMANDS_H
+#ifndef QC_COMMANDS_H
+#define QC_COMMANDS_H
+
+#include <cstdint>
+#include <vector>
 
 #include "diaglogger/types.h"
 
-namespace diaglogger {
+namespace QC {
 
 // Diag command IDs
 namespace DiagCmd {
@@ -62,6 +65,12 @@ ByteBuffer build_log_config_disable(uint8_t equip_id);
 /// Build LOG_CONFIG disable-all for all equipment IDs (0-15).
 std::vector<ByteBuffer> build_log_config_disable_all();
 
+/// Build a LOG_CONFIG SET_MASK command for one equipment ID.
+/// last_item is the log-item count (mask covers items 0..last_item-1); mask is the
+/// bit array (LSB-first, bit = log-item number). Used to enable specific log codes.
+ByteBuffer build_log_config_set_mask(uint8_t equip_id, uint32_t last_item,
+                                     const std::vector<uint8_t>& mask);
+
 /// Build an EVENT_RPT enable/disable command.
 ByteBuffer build_event_report(bool enable);
 
@@ -87,6 +96,6 @@ bool parse_poll_response(const ByteBuffer& response);
 /// Check if a response packet is a valid ACK for a given command.
 bool is_valid_response(const ByteBuffer& response, uint8_t expected_cmd);
 
-} // namespace diaglogger
+} // namespace QC
 
-#endif // DIAGLOGGER_COMMANDS_H
+#endif // QC_COMMANDS_H

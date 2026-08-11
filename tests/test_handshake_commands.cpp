@@ -3,12 +3,13 @@
 //
 // Unit tests for handshake command builders and response parsers.
 
-#include "diag/handshake_commands.h"
 #include <cassert>
-#include <iostream>
 #include <cstring>
+#include <iostream>
 
-using namespace diaglogger;
+#include "diag/handshake_commands.h"
+
+using namespace QC;
 
 static int tests_passed = 0;
 static int tests_failed = 0;
@@ -325,6 +326,88 @@ TEST(parse_diagid_table_zero_entries) {
     auto result = parse_diagid_table_response(payload);
     ASSERT_TRUE(result.valid);
     ASSERT_EQ(result.entries.size(), 0u);
+}
+
+// =====================================================================
+// QShrink4 download builders
+// =====================================================================
+
+TEST(qshrink_file_open_exact_bytes) {
+    std::array<uint8_t, 16> guid{};
+    for (int i = 0; i < 16; ++i) guid[i] = static_cast<uint8_t>(i + 1);
+    ByteBuffer pkt = build_qshrink_file_open(HandshakeCmd::QSR4_FILE_LIST_APPS, 2, guid);
+    // header: 0x80 (SUBSYS_V2), 0x12, subcmd LE (0x020F -> 0F 02)
+    ASSERT_EQ(pkt.size(), 4u + 4u + 16u);
+    ASSERT_EQ(pkt[0], 0x80);
+    ASSERT_EQ(pkt[1], 0x12);
+    ASSERT_EQ(pkt[2], 0x0F);
+    ASSERT_EQ(pkt[3], 0x02);
+    ASSERT_EQ(pkt[4], 0x02); ASSERT_EQ(pkt[5], 0x00);  // version=2 LE
+    ASSERT_EQ(pkt[6], 0x01); ASSERT_EQ(pkt[7], 0x00);  // op=FILE_OPEN LE
+    ASSERT_EQ(pkt[8], 0x01);   // guid[0]
+    ASSERT_EQ(pkt[23], 0x10);  // guid[15]
+}
+
+TEST(qshrink_file_read_exact_bytes) {
+    ByteBuffer pkt = build_qshrink_file_read(HandshakeCmd::QSR4_FILE_LIST_APPS, 2,
+                                             0x1234, 4000, 8000);
+    ASSERT_EQ(pkt.size(), 4u + 4u + 2u + 4u + 4u);
+    ASSERT_EQ(pkt[4], 0x02); ASSERT_EQ(pkt[5], 0x00);  // version
+    ASSERT_EQ(pkt[6], 0x02); ASSERT_EQ(pkt[7], 0x00);  // op=FILE_READ
+    ASSERT_EQ(pkt[8], 0x34); ASSERT_EQ(pkt[9], 0x12);  // fd LE
+    ASSERT_EQ(pkt[10], 0xA0); ASSERT_EQ(pkt[11], 0x0F); ASSERT_EQ(pkt[12], 0x00); ASSERT_EQ(pkt[13], 0x00);  // length=4000 LE
+    ASSERT_EQ(pkt[14], 0x40); ASSERT_EQ(pkt[15], 0x1F); ASSERT_EQ(pkt[16], 0x00); ASSERT_EQ(pkt[17], 0x00);  // offset=8000 LE
+}
+
+TEST(qshrink_file_close_exact_bytes) {
+    ByteBuffer pkt = build_qshrink_file_close(HandshakeCmd::QSR4_FILE_LIST_APPS, 2, 0x1234);
+    ASSERT_EQ(pkt.size(), 4u + 4u + 2u);
+    ASSERT_EQ(pkt[6], 0x03); ASSERT_EQ(pkt[7], 0x00);  // op=FILE_CLOSE
+    ASSERT_EQ(pkt[8], 0x34); ASSERT_EQ(pkt[9], 0x12);  // fd LE
+}
+
+// Build a SUBSYS_V2 response frame: [0x80][11-byte SubsystemV2Record][4-byte ver/op]
+// followed by op_payload. Header bytes are filler; parsers key off QSR4_V2_OP_OFFSET.
+static ByteBuffer make_v2_response(const ByteBuffer& op_payload) {
+    ByteBuffer resp(QSR4_V2_OP_OFFSET, 0x00);
+    resp[0] = 0x80;  // SUBSYS_V2
+    resp.insert(resp.end(), op_payload.begin(), op_payload.end());
+    return resp;
+}
+
+TEST(qshrink_file_open_parse) {
+    // op payload: [guid:16][fd=0x1234 LE][status=0]
+    ByteBuffer op(16, 0xAA);   // guid
+    op.push_back(0x34); op.push_back(0x12);  // fd LE
+    op.push_back(0x00);                       // status
+    QshrinkFileOpenResult r = parse_qshrink_file_open_response(make_v2_response(op));
+    ASSERT_TRUE(r.valid);
+    ASSERT_TRUE(r.ok());
+    ASSERT_EQ(r.file_descriptor, 0x1234);
+}
+
+TEST(qshrink_file_open_parse_bad_status) {
+    ByteBuffer op(16, 0x00);   // guid
+    op.push_back(0x00); op.push_back(0x00);  // fd
+    op.push_back(0x05);                       // status = 5
+    QshrinkFileOpenResult r = parse_qshrink_file_open_response(make_v2_response(op));
+    ASSERT_TRUE(r.valid);
+    ASSERT_FALSE(r.ok());
+    ASSERT_EQ(r.status, 5);
+}
+
+TEST(qshrink_file_read_parse) {
+    // op payload: [fd:2][offset:4][numBytes=3 LE:4][status=0][data: AA BB CC]
+    ByteBuffer op = { 0x00, 0x00,               // fd
+                      0x00, 0x00, 0x00, 0x00,   // offset
+                      0x03, 0x00, 0x00, 0x00,   // numBytes = 3
+                      0x00,                     // status
+                      0xAA, 0xBB, 0xCC };       // data
+    QshrinkFileReadResult r = parse_qshrink_file_read_response(make_v2_response(op));
+    ASSERT_TRUE(r.ok());
+    ASSERT_EQ(r.data.size(), 3u);
+    ASSERT_EQ(r.data[0], 0xAA);
+    ASSERT_EQ(r.data[2], 0xCC);
 }
 
 int main() {

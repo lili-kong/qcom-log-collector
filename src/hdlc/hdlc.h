@@ -3,13 +3,14 @@
 //
 // HDLC encoder and streaming decoder for Qualcomm diag protocol.
 
-#ifndef DIAGLOGGER_HDLC_H
-#define DIAGLOGGER_HDLC_H
+#ifndef QC_HDLC_H
+#define QC_HDLC_H
 
-#include "diaglogger/types.h"
 #include <optional>
 
-namespace diaglogger {
+#include "diaglogger/types.h"
+
+namespace QC {
 
 // HDLC framing constants
 constexpr uint8_t HDLC_FLAG   = 0x7E;
@@ -47,6 +48,6 @@ private:
     void finalize_frame();
 };
 
-} // namespace diaglogger
+} // namespace QC
 
-#endif // DIAGLOGGER_HDLC_H
+#endif // QC_HDLC_H

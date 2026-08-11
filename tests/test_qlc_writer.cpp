@@ -3,14 +3,15 @@
 //
 // Unit tests for the QLC metadata binary file writer.
 
-#include "qlc/qlc_writer.h"
 #include <cassert>
-#include <iostream>
-#include <fstream>
-#include <cstring>
 #include <cstdio>
+#include <cstring>
+#include <fstream>
+#include <iostream>
 
-using namespace diaglogger;
+#include "file_writer/qlc_writer.h"
+
+using namespace QC;
 
 static int tests_passed = 0;
 static int tests_failed = 0;
@@ -100,7 +101,9 @@ TEST(write_populated) {
     meta.hdlc_data_type = 0;
 
     meta.diagid_table.valid = true;
-    meta.diagid_table.entries = { { 1, "apps" }, { 2, "modem" } };
+    DiagIdEntry e1; e1.diag_id = 1; e1.processor_name = "apps";
+    DiagIdEntry e2; e2.diag_id = 2; e2.processor_name = "modem";
+    meta.diagid_table.entries = { e1, e2 };
 
     meta.security_keys.valid = true;
     meta.security_keys.status = 0;

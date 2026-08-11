@@ -3,23 +3,26 @@
 
 #include "qdss_commands.h"
 
-namespace diaglogger {
+namespace QC {
 
 // --- Command builders ---
 
-ByteBuffer build_qdss_hw_accel_query() {
-    // subsys=0x12 (DIAG_SERV), cmd=548 (HW_ACCELERATION)
-    // Payload: [1] operation=QUERY(2), [1] hw_type=ALL(0)
-    ByteBuffer payload = { QdssHwAccelOp::QUERY, QdssHwAccelType::ALL };
-    return build_subsystem_command(SubsysId::DIAG_SERV, QdssCmd::HW_ACCELERATION, payload);
-}
-
-ByteBuffer build_qdss_hw_accel_enable(uint8_t hw_type, uint32_t diagid_mask) {
-    // Payload: [1] operation=ENABLE(1), [1] hw_type, [4] diagid_mask (LE)
+// HW_ACCELERATION (cmd 548) REQUEST payload is 10 bytes (verified on device):
+//   [1] cmd_version, [1] operation, [2] reserved, [1] hw_type, [1] hw_accel_version,
+//   [4] diagid_mask (LE).
+// e.g. ATB enable v2: 02 01 00 00 02 01 80 00 00 00. A wrong reserved width makes the
+// device read hw_type from the wrong offset -> BAD_PARM.
+static ByteBuffer build_qdss_hw_accel_cmd(uint8_t cmd_version, uint8_t operation,
+                                          uint8_t hw_type, uint8_t hw_accel_version,
+                                          uint32_t diagid_mask) {
     ByteBuffer payload;
-    payload.reserve(6);
-    payload.push_back(QdssHwAccelOp::ENABLE);
+    payload.reserve(10);
+    payload.push_back(cmd_version);
+    payload.push_back(operation);
+    payload.push_back(0);            // reserved [1/2]
+    payload.push_back(0);            // reserved [2/2]
     payload.push_back(hw_type);
+    payload.push_back(hw_accel_version);
     payload.push_back(static_cast<uint8_t>(diagid_mask & 0xFF));
     payload.push_back(static_cast<uint8_t>((diagid_mask >> 8) & 0xFF));
     payload.push_back(static_cast<uint8_t>((diagid_mask >> 16) & 0xFF));
@@ -27,10 +30,18 @@ ByteBuffer build_qdss_hw_accel_enable(uint8_t hw_type, uint32_t diagid_mask) {
     return build_subsystem_command(SubsysId::DIAG_SERV, QdssCmd::HW_ACCELERATION, payload);
 }
 
-ByteBuffer build_qdss_hw_accel_disable(uint8_t hw_type) {
-    // Payload: [1] operation=DISABLE(0), [1] hw_type
-    ByteBuffer payload = { QdssHwAccelOp::DISABLE, hw_type };
-    return build_subsystem_command(SubsysId::DIAG_SERV, QdssCmd::HW_ACCELERATION, payload);
+ByteBuffer build_qdss_hw_accel_query(uint8_t cmd_version) {
+    // QUERY: hw_type=ALL, hw_accel_version=0, diagid_mask unused (0).
+    return build_qdss_hw_accel_cmd(cmd_version, QdssHwAccelOp::QUERY,
+                                   QdssHwAccelType::ALL, 0, 0);
+}
+
+ByteBuffer build_qdss_hw_accel_enable(uint8_t hw_type, uint32_t diagid_mask, uint8_t cmd_version) {
+    return build_qdss_hw_accel_cmd(cmd_version, QdssHwAccelOp::ENABLE, hw_type, 1, diagid_mask);
+}
+
+ByteBuffer build_qdss_hw_accel_disable(uint8_t hw_type, uint32_t diagid_mask) {
+    return build_qdss_hw_accel_cmd(2, QdssHwAccelOp::DISABLE, hw_type, 1, diagid_mask);
 }
 
 ByteBuffer build_qdss_query_transport() {
@@ -40,14 +51,14 @@ ByteBuffer build_qdss_query_transport() {
 
 ByteBuffer build_qdss_stm_enable(uint8_t processor_mask) {
     // subsys=0x12 (DIAG_SERV), cmd=532 (DIAG_OVER_STM)
-    // Payload: [1] command=ENABLE(1), [1] processor_mask
-    ByteBuffer payload = { QdssStmCommand::ENABLE_DIAG_OVER_STM, processor_mask };
+    // [1] version, [1] processor_mask, [1] stm_command
+    ByteBuffer payload = { 2, processor_mask, QdssStmCommand::ENABLE_DIAG_OVER_STM };
     return build_subsystem_command(SubsysId::DIAG_SERV, QdssCmd::DIAG_OVER_STM, payload);
 }
 
 ByteBuffer build_qdss_stm_disable() {
-    // Payload: [1] command=DISABLE(0), [1] processor_mask=ALL
-    ByteBuffer payload = { QdssStmCommand::DISABLE_DIAG_OVER_STM, QdssProcessorMask::ALL };
+    // [1] version, [1] processor_mask, [1] stm_command
+    ByteBuffer payload = { 2, QdssProcessorMask::ALL, QdssStmCommand::DISABLE_DIAG_OVER_STM };
     return build_subsystem_command(SubsysId::DIAG_SERV, QdssCmd::DIAG_OVER_STM, payload);
 }
 
@@ -61,7 +72,7 @@ ByteBuffer build_qdss_set_trace_sink(uint8_t sink) {
 ByteBuffer build_qdss_filter_sw_trace(uint8_t processor_mask, bool enable) {
     // subsys=0x5A, cmd depends on processor
     uint16_t cmd = qdss_sw_trace_cmd_for_processor(processor_mask);
-    if (cmd == 0) return {};
+    if (cmd == 0) { return {}; }
 
     // Payload: [1] enable/disable
     ByteBuffer payload = { static_cast<uint8_t>(enable ? 1 : 0) };
@@ -72,7 +83,7 @@ ByteBuffer build_qdss_filter_entity(uint8_t processor_mask, bool enable,
                                      uint8_t entity_id) {
     // subsys=0x5A, cmd depends on processor
     uint16_t cmd = qdss_entity_cmd_for_processor(processor_mask);
-    if (cmd == 0) return {};
+    if (cmd == 0) { return {}; }
 
     // Payload: [1] enable/disable, [1] entity_id
     ByteBuffer payload = { static_cast<uint8_t>(enable ? 1 : 0), entity_id };
@@ -84,78 +95,76 @@ ByteBuffer build_qdss_filter_entity(uint8_t processor_mask, bool enable,
 QdssHwAccelInfo parse_qdss_hw_accel_response(const ByteBuffer& payload) {
     QdssHwAccelInfo info;
 
-    // Minimum response: [1] status, [1] num_types
-    if (payload.size() < 2) return info;
+    // HW_ACCELERATION QUERY response op payload (verified against a dynamic-AtID device).
+    // The response echoes the request header, then adds transport + entries:
+    //   [0] cmd_version, [1] operation (echo), [2] reserved (echo),
+    //   [3] hw_type (echo), [4] hw_accel_version (echo),
+    //   [5] diag_transport, [6] num_types,
+    //   then num_types entries, each 11 bytes:
+    //     [type:1][ver:1][diagid_mask_supported:4 LE][diagid_mask_enabled:4 LE][atid:1]
+    if (payload.size() < 7) return info;
 
-    uint8_t status = payload[0];
-    if (status != 0) return info;  // Non-zero = error
+    info.response_version = payload[0];
+    info.diag_transport = payload[5];
+    uint8_t num_types = payload[6];
 
-    uint8_t num_types = payload[1];
-
-    // Each type entry: [1] hw_type, [1] supported, [4] diagid_mask
-    // Optional with response_version >= 2: [1] atid
-    size_t offset = 2;
-    for (uint8_t i = 0; i < num_types && offset + 6 <= payload.size(); ++i) {
+    constexpr size_t entry_size = 11;
+    size_t offset = 7;
+    for (uint8_t i = 0; i < num_types && offset + entry_size <= payload.size(); ++i) {
         uint8_t hw_type = payload[offset];
-        uint8_t supported = payload[offset + 1];
+        uint8_t hw_accel_ver = payload[offset + 1];
         uint32_t mask = static_cast<uint32_t>(payload[offset + 2])
                       | (static_cast<uint32_t>(payload[offset + 3]) << 8)
                       | (static_cast<uint32_t>(payload[offset + 4]) << 16)
                       | (static_cast<uint32_t>(payload[offset + 5]) << 24);
-        offset += 6;
+        uint8_t atid = payload[offset + 10];
+        offset += entry_size;
+
+        // Only process entries with hw_accel_ver == 1
+        if (1 != hw_accel_ver)
+            continue;
 
         switch (hw_type) {
             case QdssHwAccelType::STM:
-                info.stm_supported = (supported != 0);
+                info.stm_supported = true;
                 info.stm_diagid_mask = mask;
+                info.stm_atid = atid;
                 break;
             case QdssHwAccelType::ATB:
-                info.atb_supported = (supported != 0);
+                info.atb_supported = true;
                 info.atb_diagid_mask = mask;
+                info.atb_atid = atid;
                 break;
             case QdssHwAccelType::LPASS_STM:
-                info.lpass_stm_supported = (supported != 0);
+                info.lpass_stm_supported = true;
                 info.lpass_stm_diagid_mask = mask;
+                info.lpass_stm_atid = atid;
                 break;
             default:
                 break;
         }
     }
 
-    // Check for response version and dynamic ATIDs
-    if (offset < payload.size()) {
-        info.response_version = payload[offset];
-        offset += 1;
-
-        if (info.response_version >= QdssResponseVersion::DYNAMIC_ATID) {
-            // Dynamic ATIDs: [1] num_atid_entries, then per entry: [1] hw_type, [1] atid
-            if (offset < payload.size()) {
-                uint8_t num_atids = payload[offset];
-                offset += 1;
-                for (uint8_t i = 0; i < num_atids && offset + 2 <= payload.size(); ++i) {
-                    uint8_t hw_type = payload[offset];
-                    uint8_t atid = payload[offset + 1];
-                    offset += 2;
-
-                    switch (hw_type) {
-                        case QdssHwAccelType::STM:
-                            info.stm_atid = atid;
-                            break;
-                        case QdssHwAccelType::ATB:
-                            info.atb_atid = atid;
-                            break;
-                        case QdssHwAccelType::LPASS_STM:
-                            info.lpass_stm_atid = atid;
-                            break;
-                        default:
-                            break;
-                    }
-                }
-            }
-        }
-    }
-
     return info;
+}
+
+QdssHwAccelEnableResult parse_qdss_hw_accel_enable_response(const ByteBuffer& payload) {
+    QdssHwAccelEnableResult result;
+
+    // ENABLE/DISABLE response (verified on device), 11 bytes:
+    //   [0] cmd_version, [1] operation, [2] status, [3-4] reserved,
+    //   [5] hw_type, [6] hw_accel_version, [7-10] diagid_mask (LE).
+    // e.g. ATB enable OK: 02 01 00 00 00 02 01 80 00 00 00.
+    if (payload.size() < 11) return result;
+
+    result.cmd_version = payload[0];
+    result.status = payload[2];
+    result.diagid_mask = static_cast<uint32_t>(payload[7])
+                       | (static_cast<uint32_t>(payload[8]) << 8)
+                       | (static_cast<uint32_t>(payload[9]) << 16)
+                       | (static_cast<uint32_t>(payload[10]) << 24);
+    result.valid = true;
+    return result;
 }
 
 // --- Processor-to-command mapping ---
@@ -184,4 +193,4 @@ uint16_t qdss_entity_cmd_for_processor(uint8_t processor_mask) {
     }
 }
 
-} // namespace diaglogger
+} // namespace QC

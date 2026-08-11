@@ -1,25 +1,25 @@
-// SPDX-License-Identifier: Apache-2.0
-// Copyright 2024 Qualcomm Innovation Center, Inc.
+// Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+// SPDX-License-Identifier: BSD 3-Clause Clear License
 //
 // Single source of truth for the qualcomm-log-collector tool version.
 // The CI/CD pipeline updates MAJOR/MINOR/PATCH at build time.
 
-#ifndef DIAGLOGGER_VERSION_H
-#define DIAGLOGGER_VERSION_H
+#ifndef QC_VERSION_H
+#define QC_VERSION_H
 
 #define STRINGIZE2(S) #S
 #define STRINGIZE(S) STRINGIZE2(S)
 
-#define MAJOR_VERSION 0
-#define MINOR_VERSION 0
+#define MAJOR_VERSION 1
+#define MINOR_VERSION 2
 #define PATCH_VERSION 1
 
 #define VERSION_STRING "v" STRINGIZE(MAJOR_VERSION) "." STRINGIZE(MINOR_VERSION) "." STRINGIZE(PATCH_VERSION)
 
-namespace diaglogger {
+namespace QC {
 
 constexpr const char* kToolVersion = VERSION_STRING;
 
-} // namespace diaglogger
+} // namespace QC
 
-#endif // DIAGLOGGER_VERSION_H
+#endif // QC_VERSION_H

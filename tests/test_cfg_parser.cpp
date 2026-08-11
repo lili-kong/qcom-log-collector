@@ -3,17 +3,18 @@
 //
 // Unit tests for CFG file parser (HDLC and Non-HDLC command stream formats).
 
+#include <cassert>
+#include <cstdio>
+#include <cstring>
+#include <fstream>
+#include <iostream>
+
 #include "diag/cfg_parser.h"
 #include "diag/commands.h"
 #include "hdlc/hdlc.h"
 #include "hdlc/non_hdlc.h"
-#include <cassert>
-#include <iostream>
-#include <fstream>
-#include <cstring>
-#include <cstdio>
 
-using namespace diaglogger;
+using namespace QC;
 
 static int tests_passed = 0;
 static int tests_failed = 0;

@@ -3,15 +3,15 @@
 //
 // Command-line argument parser with two-level command + option support.
 
-#ifndef DIAGLOGGER_CLI_PARSER_H
-#define DIAGLOGGER_CLI_PARSER_H
-
-#include "cli_options.h"
+#ifndef QC_CLI_PARSER_H
+#define QC_CLI_PARSER_H
 
 #include <string>
 #include <vector>
 
-namespace diaglogger {
+#include "cli_options.h"
+
+namespace QC {
 
 class CliParser {
 public:
@@ -28,6 +28,6 @@ private:
     static void validate_collect_log_options(const CliOptions& opts);
 };
 
-} // namespace diaglogger
+} // namespace QC
 
-#endif // DIAGLOGGER_CLI_PARSER_H
+#endif // QC_CLI_PARSER_H

@@ -3,13 +3,14 @@
 //
 // Unit tests for device info command builders and response parsers.
 
-#include "diag/handshake_commands.h"
-#include "diag/commands.h"
 #include <cassert>
-#include <iostream>
 #include <cstring>
+#include <iostream>
 
-using namespace diaglogger;
+#include "diag/commands.h"
+#include "diag/handshake_commands.h"
+
+using namespace QC;
 
 static int tests_passed = 0;
 static int tests_failed = 0;

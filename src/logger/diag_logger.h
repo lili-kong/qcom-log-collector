@@ -3,37 +3,43 @@
 //
 // qualcomm-log-collector orchestrator: connect → configure → receive loop → shutdown.
 
-#ifndef DIAGLOGGER_DIAG_LOGGER_H
-#define DIAGLOGGER_DIAG_LOGGER_H
-
-#include "diaglogger/types.h"
-#include "transport/transport.h"
-#include "hdlc/hdlc.h"
-#include "hdlc/non_hdlc.h"
-#include "ptrace/ptrace_writer.h"
-#include "diag/cfg_parser.h"
-#include "diag/handshake_commands.h"
-#include "diag/qdss_commands.h"
-#include "diag/adpl_commands.h"
-#include "diag/response_pairing.h"
-#include "qlc/qlc_writer.h"
+#ifndef QC_DIAG_LOGGER_H
+#define QC_DIAG_LOGGER_H
 
 #include <atomic>
 #include <chrono>
-#include <thread>
-#include <memory>
-#include <string>
-#include <functional>
-#include <mutex>
 #include <condition_variable>
-#include <queue>
+#include <functional>
 #include <future>
+#include <memory>
+#include <mutex>
+#include <queue>
+#include <string>
+#include <thread>
 
-namespace diaglogger {
+#include "diag/adpl_commands.h"
+#include "diag/cfg_parser.h"
+#include "diag/handshake_commands.h"
+#include "diag/qdss_commands.h"
+#include "diag/response_pairing.h"
+#include "diaglogger/types.h"
+#include "file_writer/ptrace_writer.h"
+#include "file_writer/qlc_writer.h"
+#include "file_writer/qsr4_writer.h"
+#include "hdlc/hdlc.h"
+#include "hdlc/non_hdlc.h"
+#include "logger/adpl/adpl.h"
+#include "logger/qdss/qdss.h"
+#include "logger/qdss/qdss_diag_manager.h"
+#include "transport/transport.h"
+
+namespace QC {
 
 struct DiagLoggerConfig {
     std::string cfg_path;
     std::string port_name;
+    std::string qdss_port_name;
+    std::string adpl_port_name;
     std::string output_path;
     uint32_t    baud_rate = 115200;
     int         duration_seconds = 0;  // 0 = unlimited
@@ -43,7 +49,7 @@ struct DiagLoggerConfig {
     bool        enable_recovery = true;        // Reboot recovery (default ON)
     int         recovery_timeout_seconds = 120; // Max wait for device to come back
     bool        enable_qdss = false;
-    bool        enable_adpl = false;
+    bool        enable_adpl = false;         // Write .adplvX file alongside ptrace
     uint8_t     qdss_processor_mask = 0x3F;  // QdssProcessorMask::ALL
     uint8_t     adpl_version = 7;            // AdplVersion::HIGHEST_SUPPORTED
 };
@@ -114,12 +120,23 @@ private:
     NonHdlcDecoder non_hdlc_decoder_;
     FramingMode framing_mode_ = FramingMode::HDLC;
     PtraceWriter ptrace_;
+    std::unique_ptr<Qdss> qdss_;
+    std::unique_ptr<QdssDiagManager> qdss_diag_manager_;
+    std::unique_ptr<Adpl> adpl_;
     std::vector<ByteBuffer> cfg_commands_;
     HandshakeState handshake_state_;
 
     std::atomic<bool> running_{false};
+    std::atomic<bool> stop_invoked_{false};   // ensures stop()/teardown runs exactly once
     bool logging_started_ = false;
+    // One-shot guards: these run on the first connection only, NOT on reboot recovery
+    // (do_connection re-runs on recovery). qlc_written_ keeps a single .qlc file;
+    // qshrink_queried_ avoids re-querying the GUID list while the download thread
+    // (launched once in start()) is iterating it — which would be a data race.
+    bool qlc_written_ = false;
+    bool qshrink_queried_ = false;
     std::thread rx_thread_;
+    std::thread qshrink_thread_;
     DiagStats stats_;
 
     // Transport lifecycle thread
@@ -152,6 +169,14 @@ private:
     std::queue<ByteBuffer> rx_queue_;
     std::mutex rx_queue_mutex_;
     std::condition_variable rx_queue_cv_;
+
+    // QShrink4 FILE_READ delivers data via asynchronous "delayed" SUBSYS_V2
+    // responses that are not paired to the request. While a download is
+    // capturing, the dispatcher routes those frames here for the download thread.
+    std::queue<ByteBuffer> qshrink_rx_queue_;
+    std::mutex qshrink_rx_mutex_;
+    std::condition_variable qshrink_rx_cv_;
+    std::atomic<bool> qshrink_capturing_{false};
 
     // Single outstanding request awaiting a paired response. tx_loop registers
     // it (under pending_mutex_); the dispatcher fulfills promise on a signature
@@ -201,14 +226,21 @@ private:
     bool request_non_hdlc_switch();
 
     // Setup QDSS (HW accel, STM, trace sink, SW trace filters).
-    // Called from do_handshake() when --qdss is enabled.
+    // Called from do_handshake() when --enable-qdss is set.
     // Returns true if QDSS setup succeeded.
     bool setup_qdss();
 
     // Setup ADPL (enable accelerated data path logging).
-    // Called from do_handshake() when --adpl is enabled.
+    // Called from do_handshake() when --enable-adpl is enabled.
     // Returns true if ADPL was enabled successfully.
     bool setup_adpl();
+
+    // Merge the DPL log codes (0x11EB, 0x1951) into the equip-ID-1 LOG_CONFIG
+    // SET_MASK in cfg_commands_ so the device actually generates ADPL data packets
+    // (ADPLSteps.docx step 6/7). Called once when --enable-adpl is set, before the
+    // masks are sent. Without this, the accelerated IPA request succeeds but no data
+    // streams on \DPL.
+    void enable_adpl_log_codes();
 
     // Send parsed CFG commands to the device.
     bool send_cfg_commands();
@@ -235,8 +267,6 @@ private:
     // Receive loop (runs in rx_thread_).
     void rx_loop();
 
-
-
     // Send graceful disconnect commands to the device (disable masks,
     // QDSS, ADPL, etc.) before shutting down. Must be called while TX
     // thread is still running. Returns true if all commands were acknowledged.
@@ -246,6 +276,11 @@ private:
     // Returns true if at least one peripheral responded.
     bool query_qshrink_guids();
 
+    // Background worker: download each collected QShrink4 .qdb, decompress to
+    // .qsr4, and save it into the output directory. Runs on qshrink_thread_.
+    // Never blocks logging; per-file failures are logged and skipped.
+    void download_qshrink_files();
+
     // Write the .qlc metadata file alongside the ptrace output.
     void write_qlc_file();
 
@@ -253,6 +288,6 @@ private:
     void verbose_log(const std::string& msg);
 };
 
-} // namespace diaglogger
+} // namespace QC
 
-#endif // DIAGLOGGER_DIAG_LOGGER_H
+#endif // QC_DIAG_LOGGER_H

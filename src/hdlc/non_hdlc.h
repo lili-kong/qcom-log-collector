@@ -13,13 +13,14 @@
 //   - The trailing 0x7E is both the end of the current frame and the start
 //     of the next frame (shared delimiter)
 
-#ifndef DIAGLOGGER_NON_HDLC_H
-#define DIAGLOGGER_NON_HDLC_H
+#ifndef QC_NON_HDLC_H
+#define QC_NON_HDLC_H
 
-#include "diaglogger/types.h"
 #include <optional>
 
-namespace diaglogger {
+#include "diaglogger/types.h"
+
+namespace QC {
 
 // Non-HDLC framing constants
 constexpr uint8_t NON_HDLC_FLAG    = 0x7E;
@@ -72,6 +73,6 @@ private:
     void process_byte(uint8_t byte);
 };
 
-} // namespace diaglogger
+} // namespace QC
 
-#endif // DIAGLOGGER_NON_HDLC_H
+#endif // QC_NON_HDLC_H

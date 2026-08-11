@@ -3,13 +3,14 @@
 //
 // Unit tests for ADPL command builders and packet decoder.
 
-#include "diag/adpl_commands.h"
-#include "diag/subsystem_commands.h"
 #include <cassert>
 #include <cstdio>
 #include <cstring>
 
-using namespace diaglogger;
+#include "diag/adpl_commands.h"
+#include "diag/subsystem_commands.h"
+
+using namespace QC;
 
 static int tests_passed = 0;
 static int tests_failed = 0;
@@ -36,31 +37,39 @@ static int tests_failed = 0;
 
 TEST(build_enable) {
     auto pkt = build_adpl_enable(AdplVersion::VERSION7);
-    // subsys header(4) + dpl_command(1) + version(1) = 6 bytes
-    CHECK(pkt.size() == 6);
-    CHECK(pkt[0] == 0x4B);
-    CHECK(pkt[1] == 0x5A);   // IPA subsys
-    CHECK(pkt[2] == 0x00);   // 0x4000 low
-    CHECK(pkt[3] == 0x40);   // 0x4000 high
-    CHECK(pkt[4] == AdplDplCommand::ENABLE);   // 1
-    CHECK(pkt[5] == AdplVersion::VERSION7);    // 7
+    // subsys header(4) + payload(6): dplVersion, packetLimit, maxPacketSize(2 LE),
+    // dplCommand, reserved -- mirrors AdplDiagManager::configureAdpl FieldValueList.
+    CHECK(pkt.size() == 10);
+    CHECK(pkt[0] == 0x4B);                    // cmd_id = SUBSYS
+    CHECK(pkt[1] == SubsysId::IPA);           // IPA subsystem id
+    CHECK(pkt[2] == 0x00);                    // cmd 0x4000 low
+    CHECK(pkt[3] == 0x40);                    // cmd 0x4000 high
+    CHECK(pkt[4] == AdplVersion::VERSION7);   // dplVersion
+    CHECK(pkt[5] == 0x00);                    // packetLimit (0 = enable)
+    CHECK(pkt[6] == 0x00);                    // maxPacketSize low  (15360 = 0x3C00)
+    CHECK(pkt[7] == 0x3C);                    // maxPacketSize high
+    CHECK(pkt[8] == AdplDplCommand::ENABLE);  // dplCommand = 1
+    CHECK(pkt[9] == 0x00);                    // reserved
     PASS("build_enable");
 }
 
 TEST(build_enable_default_version) {
     auto pkt = build_adpl_enable();  // default = HIGHEST_SUPPORTED = 7
-    CHECK(pkt[5] == AdplVersion::HIGHEST_SUPPORTED);
+    CHECK(pkt[4] == AdplVersion::HIGHEST_SUPPORTED);
     PASS("build_enable_default_version");
 }
 
 TEST(build_disable) {
     auto pkt = build_adpl_disable();
-    CHECK(pkt.size() == 5);  // subsys header(4) + dpl_command(1)
+    // subsys header(4) + payload(6) -- mirrors AdplDiagManager::disableAdpl FieldValueList.
+    CHECK(pkt.size() == 10);
     CHECK(pkt[0] == 0x4B);
-    CHECK(pkt[1] == 0x5A);
-    CHECK(pkt[2] == 0x00);   // 0x4000 low
-    CHECK(pkt[3] == 0x40);   // 0x4000 high
-    CHECK(pkt[4] == AdplDplCommand::DISABLE);  // 0
+    CHECK(pkt[1] == SubsysId::IPA);
+    CHECK(pkt[2] == 0x00);                     // 0x4000 low
+    CHECK(pkt[3] == 0x40);                     // 0x4000 high
+    CHECK(pkt[4] == AdplVersion::HIGHEST_SUPPORTED);
+    CHECK(pkt[5] == 0x04);                     // packetLimit = 4 (disable)
+    CHECK(pkt[8] == AdplDplCommand::DISABLE);  // dplCommand = 0
     PASS("build_disable");
 }
 
@@ -104,13 +113,14 @@ TEST(parse_enable_response_empty) {
 // --- Header size tests ---
 
 TEST(header_sizes) {
+    // Sizes fixed by TOOLS_STATIC_ASSERTs in workspace Frame.h (V1 from AdplV1Header).
     CHECK(adpl_header_size(AdplVersion::VERSION1) == 4);
-    CHECK(adpl_header_size(AdplVersion::VERSION2) == 4);
-    CHECK(adpl_header_size(AdplVersion::VERSION3) == 8);
-    CHECK(adpl_header_size(AdplVersion::VERSION4) == 12);
+    CHECK(adpl_header_size(AdplVersion::VERSION2) == 32);
+    CHECK(adpl_header_size(AdplVersion::VERSION3) == 16);
+    CHECK(adpl_header_size(AdplVersion::VERSION4) == 16);
     CHECK(adpl_header_size(AdplVersion::VERSION5) == 16);
-    CHECK(adpl_header_size(AdplVersion::VERSION6) == 20);
-    CHECK(adpl_header_size(AdplVersion::VERSION7) == 24);
+    CHECK(adpl_header_size(AdplVersion::VERSION6) == 16);
+    CHECK(adpl_header_size(AdplVersion::VERSION7) == 16);
     CHECK(adpl_header_size(0) == 0);
     CHECK(adpl_header_size(99) == 0);
     PASS("header_sizes");
@@ -118,12 +128,30 @@ TEST(header_sizes) {
 
 // --- Padding tests ---
 
-TEST(padding_v1_v5_none) {
-    // V1-V5 have no padding
+TEST(padding_v1_none) {
+    // V1 carries its pad count in the header (m_padCd); no alignment padding.
     CHECK(adpl_padding(AdplVersion::VERSION1, 100) == 0);
-    CHECK(adpl_padding(AdplVersion::VERSION3, 7) == 0);
-    CHECK(adpl_padding(AdplVersion::VERSION5, 13) == 0);
-    PASS("padding_v1_v5_none");
+    CHECK(adpl_padding(AdplVersion::VERSION1, 7) == 0);
+    PASS("padding_v1_none");
+}
+
+TEST(padding_v2_4byte) {
+    // V2: pad to 32-bit (4-byte) boundary
+    CHECK(adpl_padding(AdplVersion::VERSION2, 8) == 0);
+    CHECK(adpl_padding(AdplVersion::VERSION2, 4) == 0);
+    CHECK(adpl_padding(AdplVersion::VERSION2, 1) == 3);
+    CHECK(adpl_padding(AdplVersion::VERSION2, 5) == 3);
+    CHECK(adpl_padding(AdplVersion::VERSION2, 6) == 2);
+    PASS("padding_v2_4byte");
+}
+
+TEST(padding_v3_v5_8byte) {
+    // V3/V4/V5: pad to 8-byte boundary
+    CHECK(adpl_padding(AdplVersion::VERSION3, 8) == 0);
+    CHECK(adpl_padding(AdplVersion::VERSION3, 7) == 1);
+    CHECK(adpl_padding(AdplVersion::VERSION4, 5) == 3);
+    CHECK(adpl_padding(AdplVersion::VERSION5, 13) == 3);
+    PASS("padding_v3_v5_8byte");
 }
 
 TEST(padding_v6_8byte) {
@@ -149,8 +177,9 @@ TEST(padding_v7_16byte) {
 // --- Decode V1 packet ---
 
 TEST(decode_v1_packet) {
-    // V1: [version=1][mux_id=0x02][length_lo=3][length_hi=0][payload: AA BB CC]
-    uint8_t data[] = { 0x01, 0x02, 0x03, 0x00, 0xAA, 0xBB, 0xCC };
+    // AdplV1Header: [0] padCd:6|reserved:2 (0), [1] muxId=0x02,
+    // [2..3] packetLength = 3 (BIG-endian: 0x00,0x03), [payload: AA BB CC]
+    uint8_t data[] = { 0x00, 0x02, 0x00, 0x03, 0xAA, 0xBB, 0xCC };
     auto pkt = decode_adpl_packet(AdplVersion::VERSION1, data, sizeof(data));
     CHECK(pkt.valid);
     CHECK(pkt.version == AdplVersion::VERSION1);
@@ -165,43 +194,50 @@ TEST(decode_v1_packet) {
 // --- Decode V3 packet ---
 
 TEST(decode_v3_packet) {
-    // V3: [statusOpcode=0x10][mux_id=1][length=4 LE][seq=0x0001][pad=0x0000][payload: 01 02 03 04]
+    // AdplV3Header (16B): [0] statusOpcode=0x10, [1] sequenceNumber=7, [5] muxId=1,
+    // [8..13] dplTimeOfDay=0, [14..15] packetLength=4 (LE), [payload: 01 02 03 04]
     uint8_t data[] = {
-        0x10, 0x01,             // statusOpcode, mux_id
-        0x04, 0x00,             // payload_len = 4 (LE)
-        0x01, 0x00,             // sequence = 1
-        0x00, 0x00,             // padding
+        0x10, 0x07,             // statusOpcode, sequenceNumber
+        0x00, 0x00,             // endPointSrcIndex/reserved1
+        0x00, 0x01,             // reserved2, muxId
+        0x00, 0x00,             // reserved3
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // dplTimeOfDay (48b) = 0
+        0x04, 0x00,             // packetLength = 4 (LE)
         0x01, 0x02, 0x03, 0x04  // payload
     };
     auto pkt = decode_adpl_packet(AdplVersion::VERSION3, data, sizeof(data));
     CHECK(pkt.valid);
     CHECK(pkt.version == AdplVersion::VERSION3);
     CHECK(pkt.mux_id == 0x01);
-    CHECK(pkt.sequence_number == 1);
+    CHECK(pkt.sequence_number == 7);
     CHECK(pkt.diag_payload.size() == 4);
     CHECK(pkt.diag_payload[0] == 0x01);
     PASS("decode_v3_packet");
 }
 
 TEST(decode_v3_wrong_opcode) {
-    // Wrong statusOpcode
-    uint8_t data[] = { 0x0C, 0x01, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0xAA, 0xBB };
+    // statusOpcode 0x0C is not valid for V3 (must be 0x10)
+    uint8_t data[16] = {0};
+    data[0] = 0x0C;
+    data[14] = 0x01;  // packetLength = 1
     auto pkt = decode_adpl_packet(AdplVersion::VERSION3, data, sizeof(data));
-    CHECK(!pkt.valid);  // 0x0C is not valid for V3
+    CHECK(!pkt.valid);
     PASS("decode_v3_wrong_opcode");
 }
 
 // --- Decode V5 packet ---
 
 TEST(decode_v5_packet) {
-    // V5: 16-byte header + payload
+    // AdplV5Header (16B): [0] statusOpcode=0x10, [1] sequenceNumber=5, [5] muxId,
+    // [8..13] dplTimeOfDay=4096, [14..15] packetLength=2 (LE), [payload: FF EE]
     uint8_t data[] = {
-        0x10, 0x00,                         // statusOpcode, mux_id
-        0x02, 0x00,                         // payload_len = 2
-        0x05, 0x00,                         // sequence = 5
-        0x00, 0x00,                         // padding
-        0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // timestamp = 4096
-        0xFF, 0xEE                          // payload
+        0x10, 0x05,             // statusOpcode, sequenceNumber
+        0x00, 0x00,             // endPointSrcIndex/reserved1
+        0x00, 0x00,             // reserved2, muxId
+        0x00, 0x00,             // reserved3
+        0x00, 0x10, 0x00, 0x00, 0x00, 0x00,  // dplTimeOfDay (48b) = 0x1000 = 4096
+        0x02, 0x00,             // packetLength = 2 (LE)
+        0xFF, 0xEE              // payload
     };
     auto pkt = decode_adpl_packet(AdplVersion::VERSION5, data, sizeof(data));
     CHECK(pkt.valid);
@@ -217,24 +253,21 @@ TEST(decode_v5_packet) {
 // --- Decode V6 packet ---
 
 TEST(decode_v6_packet) {
-    // V6: 20-byte header + payload + 8-byte aligned padding
-    uint8_t data[28] = {0};
-    data[0] = 0x0C;  // statusOpcode (V6/V7)
-    data[1] = 0x03;  // mux_id
-    data[2] = 0x05;  // payload_len = 5
-    data[3] = 0x00;
-    data[4] = 0x0A;  // sequence = 10
-    data[5] = 0x00;
-    // bytes 6-7: padding
-    // bytes 8-15: timestamp = 0
-    // bytes 16-19: reserved
-    // payload starts at 20
-    data[20] = 0x11;
-    data[21] = 0x22;
-    data[22] = 0x33;
-    data[23] = 0x44;
-    data[24] = 0x55;
-    // padding bytes 25-27 to align to 8
+    // AdplV6Header (16B) + payload(5) + 8-byte aligned padding(3) = 24
+    uint8_t data[24] = {0};
+    data[0]  = 0x0C;  // statusOpcode (low nibble); timeOfDay high nibble = 0
+    data[1]  = 0x0A;  // sequenceNumber = 10
+    data[5]  = 0x03;  // muxId = 3
+    // bytes 8-13: dplTimeOfDay = 0
+    data[14] = 0x05;  // packetLength = 5 (LE)
+    data[15] = 0x00;
+    // payload starts at 16
+    data[16] = 0x11;
+    data[17] = 0x22;
+    data[18] = 0x33;
+    data[19] = 0x44;
+    data[20] = 0x55;
+    // padding bytes 21-23 to align to 8
 
     auto pkt = decode_adpl_packet(AdplVersion::VERSION6, data, sizeof(data));
     CHECK(pkt.valid);
@@ -248,9 +281,10 @@ TEST(decode_v6_packet) {
 }
 
 TEST(decode_v6_wrong_opcode) {
-    uint8_t data[24] = {0};
-    data[0] = 0x10;  // V3-V5 opcode, not valid for V6
-    data[2] = 0x01;
+    // Low nibble of byte 0 must be 0x0C or 0x0D; 0x10 -> nibble 0x00 -> invalid.
+    uint8_t data[16] = {0};
+    data[0]  = 0x10;
+    data[14] = 0x01;
     auto pkt = decode_adpl_packet(AdplVersion::VERSION6, data, sizeof(data));
     CHECK(!pkt.valid);
     PASS("decode_v6_wrong_opcode");
@@ -259,22 +293,19 @@ TEST(decode_v6_wrong_opcode) {
 // --- Decode V7 packet ---
 
 TEST(decode_v7_packet) {
-    // V7: 24-byte header + payload + 16-byte aligned padding
-    uint8_t data[40] = {0};
-    data[0] = 0x0D;  // statusOpcode (V6/V7 alternate)
-    data[1] = 0x00;  // mux_id
-    data[2] = 0x03;  // payload_len = 3
-    data[3] = 0x00;
-    data[4] = 0x64;  // sequence = 100
-    data[5] = 0x00;
-    // timestamp at 8-15
-    data[8] = 0x01;  // timestamp = 1
-    // reserved at 16-23
-    // payload starts at 24
-    data[24] = 0xDE;
-    data[25] = 0xAD;
-    data[26] = 0xBE;
-    // padding to 16-byte boundary: need 13 more bytes padding
+    // AdplV6Header (16B, V6==V7) + payload(3) + 16-byte aligned padding(13) = 32
+    uint8_t data[32] = {0};
+    data[0]  = 0x0D;  // statusOpcode (low nibble); timeOfDay high nibble = 0
+    data[1]  = 0x64;  // sequenceNumber = 100
+    data[5]  = 0x00;  // muxId = 0
+    data[8]  = 0x01;  // dplTimeOfDay low byte = 1 -> timestamp = 1
+    data[14] = 0x03;  // packetLength = 3 (LE)
+    data[15] = 0x00;
+    // payload starts at 16
+    data[16] = 0xDE;
+    data[17] = 0xAD;
+    data[18] = 0xBE;
+    // padding to 16-byte boundary (13 bytes)
 
     auto pkt = decode_adpl_packet(AdplVersion::VERSION7, data, sizeof(data));
     CHECK(pkt.valid);
@@ -292,33 +323,34 @@ TEST(decode_v7_packet) {
 // --- Frame size tests ---
 
 TEST(frame_size_v1) {
-    uint8_t data[] = { 0x01, 0x00, 0x0A, 0x00 };  // payload_len=10
+    // AdplV1Header: packetLength big-endian at [2..3] = 10; padCd = 0.
+    uint8_t data[] = { 0x00, 0x00, 0x00, 0x0A };
     size_t fs = adpl_frame_size(AdplVersion::VERSION1, data, sizeof(data));
     CHECK(fs == 4 + 10);  // header(4) + payload(10) + pad(0)
     PASS("frame_size_v1");
 }
 
 TEST(frame_size_v6_aligned) {
-    uint8_t data[20] = {0};
-    data[2] = 0x08;  // payload_len=8 (already 8-byte aligned)
+    uint8_t data[16] = {0};
+    data[14] = 0x08;  // packetLength=8 (already 8-byte aligned)
     size_t fs = adpl_frame_size(AdplVersion::VERSION6, data, sizeof(data));
-    CHECK(fs == 20 + 8 + 0);  // header(20) + payload(8) + pad(0)
+    CHECK(fs == 16 + 8 + 0);  // header(16) + payload(8) + pad(0)
     PASS("frame_size_v6_aligned");
 }
 
 TEST(frame_size_v6_unaligned) {
-    uint8_t data[20] = {0};
-    data[2] = 0x05;  // payload_len=5 → pad=3
+    uint8_t data[16] = {0};
+    data[14] = 0x05;  // packetLength=5 → pad=3
     size_t fs = adpl_frame_size(AdplVersion::VERSION6, data, sizeof(data));
-    CHECK(fs == 20 + 5 + 3);
+    CHECK(fs == 16 + 5 + 3);
     PASS("frame_size_v6_unaligned");
 }
 
 TEST(frame_size_v7_unaligned) {
-    uint8_t data[24] = {0};
-    data[2] = 0x03;  // payload_len=3 → pad=13
+    uint8_t data[16] = {0};
+    data[14] = 0x03;  // packetLength=3 → pad=13
     size_t fs = adpl_frame_size(AdplVersion::VERSION7, data, sizeof(data));
-    CHECK(fs == 24 + 3 + 13);
+    CHECK(fs == 16 + 3 + 13);
     PASS("frame_size_v7_unaligned");
 }
 
@@ -346,15 +378,15 @@ TEST(decode_too_short_for_header) {
 }
 
 TEST(decode_too_short_for_payload) {
-    // V1 header says payload=10, but only 2 bytes available after header
-    uint8_t data[] = { 0x01, 0x00, 0x0A, 0x00, 0xFF, 0xFF };
+    // V1 header says payload=10 (big-endian), but only 2 bytes available after header
+    uint8_t data[] = { 0x00, 0x00, 0x00, 0x0A, 0xFF, 0xFF };
     auto pkt = decode_adpl_packet(AdplVersion::VERSION1, data, sizeof(data));
     CHECK(!pkt.valid);
     PASS("decode_too_short_for_payload");
 }
 
 TEST(decode_zero_payload) {
-    uint8_t data[] = { 0x01, 0x00, 0x00, 0x00 };  // payload_len=0
+    uint8_t data[] = { 0x00, 0x00, 0x00, 0x00 };  // packetLength=0, padCd=0
     auto pkt = decode_adpl_packet(AdplVersion::VERSION1, data, sizeof(data));
     CHECK(pkt.valid);
     CHECK(pkt.diag_payload.empty());

@@ -5,13 +5,15 @@
 // All commands are sent over the existing diag serial connection.
 // QDSS data flows back as diag packets on the same port (Diag-over-STM).
 
-#ifndef DIAGLOGGER_QDSS_COMMANDS_H
-#define DIAGLOGGER_QDSS_COMMANDS_H
+#ifndef QC_QDSS_COMMANDS_H
+#define QC_QDSS_COMMANDS_H
+
+#include <cstdint>
 
 #include "diaglogger/types.h"
 #include "subsystem_commands.h"
 
-namespace diaglogger {
+namespace QC {
 
 // --- QDSS Diag Service subsystem commands (subsys=0x12) ---
 
@@ -119,21 +121,24 @@ struct QdssHwAccelInfo {
     uint8_t atb_atid = QdssAtid::ATB;
     uint8_t lpass_stm_atid = QdssAtid::LPASS_STM;
     uint8_t response_version = QdssResponseVersion::NO_DYNAMIC_ATID;
+    uint8_t diag_transport = QdssSinkType::USB;  // Device-reported trace sink
 };
 
 // --- Command builders ---
 
 /// Build HW acceleration query command (subsys=0x12, cmd=548).
 /// Queries which HW acceleration types (STM, ATB, LPASS_STM) the device supports.
-ByteBuffer build_qdss_hw_accel_query();
+/// cmd_version: 2 for dynamic-AtID devices (TUF getDynamicAtId), 1 otherwise.
+ByteBuffer build_qdss_hw_accel_query(uint8_t cmd_version = 2);
 
 /// Build HW acceleration enable command (subsys=0x12, cmd=548).
 /// hw_type: QdssHwAccelType::STM, ATB, or LPASS_STM
 /// diagid_mask: bitmask of DiagIDs to enable for this HW type
-ByteBuffer build_qdss_hw_accel_enable(uint8_t hw_type, uint32_t diagid_mask);
+ByteBuffer build_qdss_hw_accel_enable(uint8_t hw_type, uint32_t diagid_mask, uint8_t cmd_version = 2);
 
 /// Build HW acceleration disable command (subsys=0x12, cmd=548).
-ByteBuffer build_qdss_hw_accel_disable(uint8_t hw_type);
+/// diagid_mask: the enabled mask to disable (from previous enable response)
+ByteBuffer build_qdss_hw_accel_disable(uint8_t hw_type, uint32_t diagid_mask = 0);
 
 /// Build transport query command (subsys=0x12, cmd=547).
 ByteBuffer build_qdss_query_transport();
@@ -166,12 +171,24 @@ ByteBuffer build_qdss_filter_entity(uint8_t processor_mask, bool enable,
 /// Returns parsed QdssHwAccelInfo, or default values on parse error.
 QdssHwAccelInfo parse_qdss_hw_accel_response(const ByteBuffer& payload);
 
+/// Parsed result from HW acceleration enable/disable response.
+struct QdssHwAccelEnableResult {
+    uint8_t cmd_version = 0;
+    uint8_t status = 0xFF;       // 0 = success
+    uint32_t diagid_mask = 0;    // Actual mask enabled/disabled on device
+    bool valid = false;
+};
+
+/// Parse HW acceleration enable/disable response payload.
+/// payload: the subsystem response payload (after 4-byte header).
+QdssHwAccelEnableResult parse_qdss_hw_accel_enable_response(const ByteBuffer& payload);
+
 /// Get the SW trace filter command for a given processor.
 uint16_t qdss_sw_trace_cmd_for_processor(uint8_t processor_mask);
 
 /// Get the entity filter command for a given processor.
 uint16_t qdss_entity_cmd_for_processor(uint8_t processor_mask);
 
-} // namespace diaglogger
+} // namespace QC
 
-#endif // DIAGLOGGER_QDSS_COMMANDS_H
+#endif // QC_QDSS_COMMANDS_H

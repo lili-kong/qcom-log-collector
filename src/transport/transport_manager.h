@@ -5,8 +5,8 @@
 // and enumeration. Provides a single point of control for the QDS
 // device monitor lifecycle and device discovery operations.
 
-#ifndef DIAGLOGGER_TRANSPORT_MANAGER_H
-#define DIAGLOGGER_TRANSPORT_MANAGER_H
+#ifndef QC_TRANSPORT_MANAGER_H
+#define QC_TRANSPORT_MANAGER_H
 
 #include <mutex>
 #include <string>
@@ -16,12 +16,56 @@
 #include <windows.h>
 #endif
 
-namespace diaglogger {
+namespace QC {
 
-/// Information about a discovered QcDevice.
+/// Protocol type classification (mirrors QUTS ProtocolType enum).
+enum ProtocolType {
+    PROT_UNKNOWN = -1,
+    PROT_SAHARA,
+    PROT_FIREHOSE,
+    PROT_DIAG,
+    PROT_ADPL,
+    PROT_QDSS,
+    PROT_QMI,
+    PROT_ADB,
+    PROT_FASTBOOT,
+    PROT_NMEA,
+    PROT_DUN,
+    PROT_RMNET,
+    PROT_RNDIS,
+    PROT_MBIM,
+    PROT_PROTOBUF,
+    PROT_TAC,
+    PROT_EPM,
+    PROT_TELNET,
+    PROT_FTP,
+    PROT_EUD,
+    PROT_QSPS,
+    PROT_SERIAL,
+    PROT_PROMIRA,
+    PROT_MAX
+};
+
+/// Information about a discovered QcDevice protocol.
 struct DeviceInfo {
-    std::string device_name;     // Full DevDesc string for OpenDevice
-    std::string com_port;        // Extracted COM port (e.g. "COM3"), empty if N/A
+    std::string  device_name;     // Full DevDesc string for OpenDevice
+    std::string  com_port;        // Extracted COM port (e.g. "COM3"), empty if N/A
+    std::string  parent_device;   // Parent composite device description
+    std::string  parent_location; // Parent physical location on bus
+    std::string  adb_serial_number; // ADB serial number from QcDevice
+    std::string  msm_serial_number; // MSM serial number from QcDevice
+    ProtocolType protocol = PROT_UNKNOWN;
+    uint32_t     flags = 0;       // Device flags (type, state, bus, QC driver)
+};
+
+/// A composite device with its child protocols.
+/// Protocols sharing the same parent_device + parent_location are grouped.
+struct CompositeDevice {
+    std::string description;             // Parent device description (friendly name)
+    std::string location;                // Physical bus location
+    std::string adb_serial_number;       // ADB serial number
+    std::string msm_serial_number;       // MSM serial number
+    std::vector<DeviceInfo> protocols;   // Child protocols (DIAG, QDSS, ADPL)
 };
 
 /// Manages QcDevice device detection and monitor lifecycle.
@@ -46,13 +90,16 @@ public:
     /// Whether the device monitor is currently running.
     bool is_monitor_running() const;
 
-    /// Enumerate all currently discovered devices.
+    /// Enumerate all currently discovered devices (flat list).
     /// Requires monitor to already be running (via start_monitor).
     std::vector<DeviceInfo> enumerate_devices();
 
-    /// Enumerate libusb sub-interfaces (populated by device callbacks
-    /// after enumerate_devices() triggers libusb enumeration).
-    std::vector<DeviceInfo> enumerate_interfaces();
+    /// Enumerate devices grouped by composite parent.
+    /// Protocols sharing the same parent are grouped under one CompositeDevice.
+    /// Standalone (non-composite) protocols get their own CompositeDevice entry.
+    /// @param filter  Protocol types to include. Empty = no filtering.
+    std::vector<CompositeDevice> enumerate_composite_devices(
+        const std::vector<ProtocolType>& filter = {PROT_DIAG, PROT_QDSS, PROT_ADPL});
 
     /// Resolve a short device name (e.g. "COM3") to the full DevDesc string
     /// by searching the current device list. Returns the resolved name,
@@ -83,6 +130,6 @@ private:
     void configure_features();
 };
 
-} // namespace diaglogger
+} // namespace QC
 
-#endif // DIAGLOGGER_TRANSPORT_MANAGER_H
+#endif // QC_TRANSPORT_MANAGER_H

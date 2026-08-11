@@ -3,12 +3,13 @@
 //
 // Unit tests for diag command builders.
 
-#include "diag/commands.h"
 #include <cassert>
-#include <iostream>
 #include <cstring>
+#include <iostream>
 
-using namespace diaglogger;
+#include "diag/commands.h"
+
+using namespace QC;
 
 static int tests_passed = 0;
 static int tests_failed = 0;

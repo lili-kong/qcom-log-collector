@@ -1,11 +1,10 @@
 // Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 // SPDX-License-Identifier: BSD 3-Clause Clear License
 
-#include <KL/Macros.h>
-#include <sstream>
-
 #include "hdlc.h"
 #include "crc16.h"
+#include <KL/Macros.h>
+#include <sstream>
 
 namespace QC {
 

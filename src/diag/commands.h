@@ -9,7 +9,8 @@
 #include <cstdint>
 #include <vector>
 
-#include "diaglogger/types.h"
+#include "types.h"
+#include <string>
 
 namespace QC {
 

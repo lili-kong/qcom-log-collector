@@ -8,12 +8,12 @@
 #ifndef QC_HANDSHAKE_COMMANDS_H
 #define QC_HANDSHAKE_COMMANDS_H
 
+#include "types.h"
+#include "subsystem_commands.h"
+
 #include <array>
 #include <string>
 #include <vector>
-
-#include "diaglogger/types.h"
-#include "subsystem_commands.h"
 
 namespace QC {
 

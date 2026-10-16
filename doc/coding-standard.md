@@ -13,7 +13,7 @@ Conventions observed and enforced across the codebase.
 | Item | Convention |
 |------|-----------|
 | File names | `snake_case.cpp`, `snake_case.h` |
-| License header | `// SPDX-License-Identifier: Apache-2.0` on first line |
+| License header | `SPDX-License-Identifier: BSD 3-Clause Clear License` on first line |
 | Copyright | `// Copyright 2024 Qualcomm Innovation Center, Inc.` |
 | Include guards | `#ifndef QC_<FILENAME>_H` / `#define` / `#endif` (no `#pragma once`) |
 | Include order | System headers first, then project headers |
@@ -23,7 +23,7 @@ Conventions observed and enforced across the codebase.
 
 | Item | Style | Example |
 |------|-------|---------|
-| Classes / Structs | PascalCase | `HdlcDecoder`, `DiagLogger`, `PtraceMetadata` |
+| Classes / Structs | PascalCase | `HdlcDecoder`, `DiagLoggerService`, `PtraceMetadata` |
 | Enum types | `enum class`, PascalCase | `enum class Direction : uint8_t { TX, RX }` |
 | Enum values | PascalCase or UPPER_CASE | `TransportState::CONNECTED`, `CfgVersion::HdlcStream` |
 | Functions / Methods | snake_case | `hdlc_encode()`, `is_open()`, `parse_cfg_file()` |
@@ -187,7 +187,7 @@ struct DiagLoggerConfig {
     bool verbose = false;
 };
 
-explicit DiagLogger(const DiagLoggerConfig& config);
+explicit DiagLoggerService(const DiagLoggerConfig& config);
 ```
 
 ## Platform-Specific Code

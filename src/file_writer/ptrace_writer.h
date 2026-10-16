@@ -23,7 +23,7 @@
 #include <mutex>
 #include <string>
 
-#include "diaglogger/types.h"
+#include "types.h"
 
 namespace QC {
 

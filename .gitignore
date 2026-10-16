@@ -1,0 +1,49 @@
+# Visual Studio
+.vs/
+*.user
+*.suo
+*.ncb
+*.sdf
+*.opensdf
+*.VC.db
+*.VC.opendb
+
+# Build output
+build/
+Build/
+
+# Claude
+CLAUDE.md
+.claude/
+out/
+Debug/
+Release/
+x64/
+x86/
+*.obj
+*.pdb
+*.ilk
+*.exe
+*.dll
+*.lib
+*.exp
+
+# Codex local configuration
+.codex/
+AGENTS.md
+
+# Design documents
+doc/design/
+
+# IntelliSense / Predicted Input Cache
+PredictedInputCache_*.dat
+
+# QcDevice vendored prebuilt libraries — un-ignore each directory level
+# (git cannot negate files inside an ignored directory without negating the directory first)
+src/qcdevice/qds_lnx/libLNX/*.so
+src/qcdevice/qds_lnx/libLNX/*.a
+src/qcdevice/*.sln
+src/qcdevice/*.vcxproj
+src/qcdevice/*.filters
+src/qcdevice/QcDevice.dir/
+src/qcdevice/QcDevice.dir/**

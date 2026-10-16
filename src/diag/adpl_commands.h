@@ -11,7 +11,7 @@
 #include <cstddef>
 #include <cstdint>
 
-#include "diaglogger/types.h"
+#include "types.h"
 #include "subsystem_commands.h"
 
 namespace QC {

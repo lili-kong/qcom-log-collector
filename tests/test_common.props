@@ -9,8 +9,8 @@
   </PropertyGroup>
   <ItemDefinitionGroup>
     <ClCompile>
-      <AdditionalIncludeDirectories>$(SolutionDir)include;$(SolutionDir)src;$(SolutionDir)src\qds\QDS_WIN;$(SolutionDir)src\qds\common;$(SolutionDir)src\qds\libusb\source;$(SolutionDir)src\qds\libusb\lib-1.0.27\include;$(SolutionDir)src\qds\qds_lnx\inc;$(SolutionDir)src\external\kLogger\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <PreprocessorDefinitions>TOOLS_TARGET_WINDOWS=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>$(SolutionDir)src;$(SolutionDir)src\qds\qds_win;$(SolutionDir)src\qds\common;$(SolutionDir)src\qds\libusb\source;$(SolutionDir)src\qds\libusb\lib-1.0.27\include;$(SolutionDir)src\qds\qds_lnx\inc;$(SolutionDir)src\external\kLogger\include;$(SolutionDir)src\external\inflate;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>TOOLS_TARGET_WINDOWS=1;QLC_STATIC;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
     <Link>
       <AdditionalDependencies>setupapi.lib;cfgmgr32.lib;shlwapi.lib;%(AdditionalDependencies)</AdditionalDependencies>
@@ -29,25 +29,35 @@
     <ClCompile Include="$(SolutionDir)src\diag\handshake_commands.cpp" />
     <ClCompile Include="$(SolutionDir)src\diag\response_pairing.cpp" />
     <!-- Transport sources -->
+    <ClCompile Include="$(SolutionDir)src\transport\transport.cpp" />
     <ClCompile Include="$(SolutionDir)src\transport\transport_manager.cpp" />
     <ClCompile Include="$(SolutionDir)src\transport\qcdevice_transport.cpp" />
     <ClCompile Include="$(SolutionDir)src\transport\transport_factory.cpp" />
+    <!-- Protocol sources -->
+    <ClCompile Include="$(SolutionDir)src\protocol\protocol.cpp" />
+    <ClCompile Include="$(SolutionDir)src\protocol\diag.cpp" />
+    <ClCompile Include="$(SolutionDir)src\protocol\qdss\qdss.cpp" />
+    <ClCompile Include="$(SolutionDir)src\protocol\adpl\adpl.cpp" />
     <!-- File writer sources -->
     <ClCompile Include="$(SolutionDir)src\file_writer\ptrace_writer.cpp" />
     <ClCompile Include="$(SolutionDir)src\file_writer\binary_writer.cpp" />
     <ClCompile Include="$(SolutionDir)src\file_writer\qlc_writer.cpp" />
-    <!-- Logger sources -->
-    <ClCompile Include="$(SolutionDir)src\logger\diag_logger.cpp" />
-    <!-- QDSS sources -->
-    <ClCompile Include="$(SolutionDir)src\logger\qdss\qdss.cpp" />
-    <ClCompile Include="$(SolutionDir)src\logger\qdss\qdss_diag_manager.cpp" />
+    <ClCompile Include="$(SolutionDir)src\file_writer\qsr4_writer.cpp" />
+    <!-- Function sources -->
+    <ClCompile Include="$(SolutionDir)src\function\diag_logger_service.cpp" />
+    <ClCompile Include="$(SolutionDir)src\function\diag_logger_qdss_manager.cpp" />
+    <!-- Public API sources (src/exports/) -->
+    <ClCompile Include="$(SolutionDir)src\device_discovery.cpp" />
+    <ClCompile Include="$(SolutionDir)src\diag_logger.cpp" />
+    <!-- External sources -->
+    <ClCompile Include="$(SolutionDir)src\external\inflate\inflate.cpp" />
     <!-- QcDevice: Windows sources -->
-    <ClCompile Include="$(SolutionDir)src\qds\QDS_WIN\scandev.cpp">
+    <ClCompile Include="$(SolutionDir)src\qds\qds_win\scandev.cpp">
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <ConformanceMode>false</ConformanceMode>
       <SDLCheck>false</SDLCheck>
     </ClCompile>
-    <ClCompile Include="$(SolutionDir)src\qds\QDS_WIN\QdIoQmi.cpp">
+    <ClCompile Include="$(SolutionDir)src\qds\qds_win\QdIoQmi.cpp">
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <ConformanceMode>false</ConformanceMode>
       <SDLCheck>false</SDLCheck>

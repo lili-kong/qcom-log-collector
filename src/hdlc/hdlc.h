@@ -6,9 +6,8 @@
 #ifndef QC_HDLC_H
 #define QC_HDLC_H
 
+#include "types.h"
 #include <optional>
-
-#include "diaglogger/types.h"
 
 namespace QC {
 

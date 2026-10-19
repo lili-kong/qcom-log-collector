@@ -10,7 +10,7 @@
 #include <string>
 #include <vector>
 
-#include "diaglogger/types.h"
+#include "types.h"
 
 namespace QC {
 

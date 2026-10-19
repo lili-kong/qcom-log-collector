@@ -122,11 +122,11 @@ KL::Logger::get_instance().consoleOverwriteLine("\rProgress: 75%");
 
 Log files are automatically named with timestamp and process ID:
 ```
-diaglogger_05-05-2026-14-30-45-123_v1.0_PID_12345_START_1.log
-diaglogger_05-05-2026-14-35-20-456_v1.0_PID_12345_2.log
+qlc_05-05-2026-14-30-45-123_v1.0_PID_12345_START_1.log
+qlc_05-05-2026-14-35-20-456_v1.0_PID_12345_2.log
 ```
 
-Format: `diaglogger_DD-MM-YYYY-HH-MM-SS-mmm_VERSION_PID_PROCESSID_SEQUENCE.log`
+Format: `qlc_DD-MM-YYYY-HH-MM-SS-mmm_VERSION_PID_PROCESSID_SEQUENCE.log`
 
 ## Log Format
 

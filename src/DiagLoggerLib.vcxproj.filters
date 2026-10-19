@@ -1,0 +1,143 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="Source Files">
+      <UniqueIdentifier>{A0000000-0000-0000-0000-000000000002}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\diag">
+      <UniqueIdentifier>{A0000000-0000-0000-0000-000000000003}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\external\inflate">
+      <UniqueIdentifier>{A0000000-0000-0000-0000-000000000004}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\file_writer">
+      <UniqueIdentifier>{A0000000-0000-0000-0000-000000000005}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\function">
+      <UniqueIdentifier>{A0000000-0000-0000-0000-000000000006}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\hdlc">
+      <UniqueIdentifier>{A0000000-0000-0000-0000-000000000007}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\protocol">
+      <UniqueIdentifier>{A0000000-0000-0000-0000-000000000008}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\protocol\adpl">
+      <UniqueIdentifier>{A0000000-0000-0000-0000-000000000009}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\protocol\qdss">
+      <UniqueIdentifier>{A0000000-0000-0000-0000-000000000010}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\qds\common">
+      <UniqueIdentifier>{A0000000-0000-0000-0000-000000000011}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\qds\libusb\source">
+      <UniqueIdentifier>{A0000000-0000-0000-0000-000000000012}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\qds\qds_win">
+      <UniqueIdentifier>{A0000000-0000-0000-0000-000000000013}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\transport">
+      <UniqueIdentifier>{A0000000-0000-0000-0000-000000000014}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="$(SolutionDir)src\hdlc\hdlc.cpp">
+      <Filter>Source Files\hdlc</Filter>
+    </ClCompile>
+    <ClCompile Include="$(SolutionDir)src\hdlc\non_hdlc.cpp">
+      <Filter>Source Files\hdlc</Filter>
+    </ClCompile>
+    <ClCompile Include="$(SolutionDir)src\diag\commands.cpp">
+      <Filter>Source Files\diag</Filter>
+    </ClCompile>
+    <ClCompile Include="$(SolutionDir)src\diag\cfg_parser.cpp">
+      <Filter>Source Files\diag</Filter>
+    </ClCompile>
+    <ClCompile Include="$(SolutionDir)src\diag\subsystem_commands.cpp">
+      <Filter>Source Files\diag</Filter>
+    </ClCompile>
+    <ClCompile Include="$(SolutionDir)src\diag\qdss_commands.cpp">
+      <Filter>Source Files\diag</Filter>
+    </ClCompile>
+    <ClCompile Include="$(SolutionDir)src\diag\adpl_commands.cpp">
+      <Filter>Source Files\diag</Filter>
+    </ClCompile>
+    <ClCompile Include="$(SolutionDir)src\diag\handshake_commands.cpp">
+      <Filter>Source Files\diag</Filter>
+    </ClCompile>
+    <ClCompile Include="$(SolutionDir)src\diag\response_pairing.cpp">
+      <Filter>Source Files\diag</Filter>
+    </ClCompile>
+    <ClCompile Include="$(SolutionDir)src\transport\transport.cpp">
+      <Filter>Source Files\transport</Filter>
+    </ClCompile>
+    <ClCompile Include="$(SolutionDir)src\transport\transport_manager.cpp">
+      <Filter>Source Files\transport</Filter>
+    </ClCompile>
+    <ClCompile Include="$(SolutionDir)src\transport\qcdevice_transport.cpp">
+      <Filter>Source Files\transport</Filter>
+    </ClCompile>
+    <ClCompile Include="$(SolutionDir)src\transport\transport_factory.cpp">
+      <Filter>Source Files\transport</Filter>
+    </ClCompile>
+    <ClCompile Include="$(SolutionDir)src\protocol\protocol.cpp">
+      <Filter>Source Files\protocol</Filter>
+    </ClCompile>
+    <ClCompile Include="$(SolutionDir)src\protocol\diag.cpp">
+      <Filter>Source Files\protocol</Filter>
+    </ClCompile>
+    <ClCompile Include="$(SolutionDir)src\protocol\qdss\qdss.cpp">
+      <Filter>Source Files\protocol\qdss</Filter>
+    </ClCompile>
+    <ClCompile Include="$(SolutionDir)src\protocol\adpl\adpl.cpp">
+      <Filter>Source Files\protocol\adpl</Filter>
+    </ClCompile>
+    <ClCompile Include="$(SolutionDir)src\file_writer\ptrace_writer.cpp">
+      <Filter>Source Files\file_writer</Filter>
+    </ClCompile>
+    <ClCompile Include="$(SolutionDir)src\file_writer\binary_writer.cpp">
+      <Filter>Source Files\file_writer</Filter>
+    </ClCompile>
+    <ClCompile Include="$(SolutionDir)src\file_writer\qlc_writer.cpp">
+      <Filter>Source Files\file_writer</Filter>
+    </ClCompile>
+    <ClCompile Include="$(SolutionDir)src\file_writer\qsr4_writer.cpp">
+      <Filter>Source Files\file_writer</Filter>
+    </ClCompile>
+    <ClCompile Include="$(SolutionDir)src\function\diag_logger_service.cpp">
+      <Filter>Source Files\function</Filter>
+    </ClCompile>
+    <ClCompile Include="$(SolutionDir)src\function\diag_logger_qdss_manager.cpp">
+      <Filter>Source Files\function</Filter>
+    </ClCompile>
+    <ClCompile Include="$(SolutionDir)src\device_discovery.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="$(SolutionDir)src\diag_logger.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="$(SolutionDir)src\external\inflate\inflate.cpp">
+      <Filter>Source Files\external\inflate</Filter>
+    </ClCompile>
+    <ClCompile Include="$(SolutionDir)src\qds\qds_win\scandev.cpp">
+      <Filter>Source Files\qds\qds_win</Filter>
+    </ClCompile>
+    <ClCompile Include="$(SolutionDir)src\qds\qds_win\QdIoQmi.cpp">
+      <Filter>Source Files\qds\qds_win</Filter>
+    </ClCompile>
+    <ClCompile Include="$(SolutionDir)src\qds\libusb\source\qcom-libusb.cpp">
+      <Filter>Source Files\qds\libusb\source</Filter>
+    </ClCompile>
+    <ClCompile Include="$(SolutionDir)src\qds\libusb\source\libusb-dynamic-loader.cpp">
+      <Filter>Source Files\qds\libusb\source</Filter>
+    </ClCompile>
+    <ClCompile Include="$(SolutionDir)src\qds\common\utils.cpp">
+      <Filter>Source Files\qds\common</Filter>
+    </ClCompile>
+    <ClCompile Include="$(SolutionDir)src\qds\common\qdver.cpp">
+      <Filter>Source Files\qds\common</Filter>
+    </ClCompile>
+  </ItemGroup>
+</Project>
+

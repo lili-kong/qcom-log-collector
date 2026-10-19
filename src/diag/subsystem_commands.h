@@ -8,7 +8,7 @@
 #ifndef QC_SUBSYSTEM_COMMANDS_H
 #define QC_SUBSYSTEM_COMMANDS_H
 
-#include "diaglogger/types.h"
+#include "types.h"
 
 namespace QC {
 

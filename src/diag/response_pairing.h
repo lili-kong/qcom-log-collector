@@ -6,7 +6,7 @@
 #ifndef QC_RESPONSE_PAIRING_H
 #define QC_RESPONSE_PAIRING_H
 
-#include "diaglogger/types.h"
+#include "types.h"
 
 namespace QC {
 
@@ -24,7 +24,7 @@ namespace DiagError {
     constexpr uint8_t BAD_LEN      = 0x15;
     constexpr uint8_t BAD_DEV      = 0x16;
     constexpr uint8_t BAD_MODE     = 0x18;
-    constexpr uint8_t BAD_SPC_MODE = 0x19;
+    constexpr uint8_t BAD_SPC_MODE = 0x42;  ///< Invalid NV read/write due to SPC error (ICD 80-V1294-1 §3.4.66) }
 }
 
 // Derive the expected response signature from a request payload.

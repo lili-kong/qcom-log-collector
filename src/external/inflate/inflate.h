@@ -1,7 +1,7 @@
 #ifndef QC_INFLATE_H
 #define QC_INFLATE_H
 
-#include "diaglogger/types.h"
+#include "types.h"
 #include <cstddef>
 #include <cstdint>
 

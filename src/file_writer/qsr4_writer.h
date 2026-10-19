@@ -7,7 +7,7 @@
 #ifndef QC_QSR4_WRITER_H
 #define QC_QSR4_WRITER_H
 
-#include "diaglogger/types.h"
+#include "types.h"
 #include <array>
 #include <string>
 

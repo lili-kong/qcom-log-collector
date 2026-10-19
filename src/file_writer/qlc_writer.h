@@ -11,8 +11,8 @@
 
 #include "diag/handshake_commands.h"
 #include "diag/qdss_commands.h"
-#include "diaglogger/types.h"
-#include "diaglogger/version.h"
+#include "types.h"
+#include "version.h"
 
 namespace QC {
 

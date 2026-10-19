@@ -13,7 +13,7 @@
 namespace QC {
 
 // CRC-16-CCITT lookup table (reflected polynomial 0x8408)
-inline constexpr uint16_t CRC16_TABLE[256] = {
+inline constexpr uint16_t kCrc16Table[256] = {
     0x0000, 0x1189, 0x2312, 0x329B, 0x4624, 0x57AD, 0x6536, 0x74BF,
     0x8C48, 0x9DC1, 0xAF5A, 0xBED3, 0xCA6C, 0xDBE5, 0xE97E, 0xF8F7,
     0x1081, 0x0108, 0x3393, 0x221A, 0x56A5, 0x472C, 0x75B7, 0x643E,
@@ -53,7 +53,7 @@ inline constexpr uint16_t CRC16_TABLE[256] = {
 inline uint16_t crc16(const uint8_t* data, size_t len) {
     uint16_t crc = 0xFFFF;
     for (size_t i = 0; i < len; ++i) {
-        crc = (crc >> 8) ^ CRC16_TABLE[(crc ^ data[i]) & 0xFF];
+        crc = (crc >> 8) ^ kCrc16Table[(crc ^ data[i]) & 0xFF];
     }
     return crc ^ 0xFFFF;
 }

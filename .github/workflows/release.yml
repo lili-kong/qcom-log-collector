@@ -9,7 +9,7 @@ on:
       version:
         description: >
           QLC version to release (e.g. 1.2.4). Updates MAJOR/MINOR/PATCH
-          in include/diaglogger/version.h.
+          in src/version.h.
         required: true
         type: string
       base_branch:
@@ -119,12 +119,12 @@ jobs:
           git checkout -b "$BRANCH"
           echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
 
-      # ── 2. Bump version in include/diaglogger/version.h ────────────────────
-      - name: Update include/diaglogger/version.h
+      # ── 2. Bump version in src/version.h ────────────────────────────────────
+      - name: Update src/version.h
         env:
           VERSION: ${{ inputs.version }}
         run: |
-          FILE="include/diaglogger/version.h"
+          FILE="src/version.h"
           MAJOR="${VERSION%%.*}"
           REST="${VERSION#*.}"
           MINOR="${REST%%.*}"
@@ -147,7 +147,7 @@ jobs:
         env:
           VERSION: ${{ inputs.version }}
         run: |
-          git add include/diaglogger/version.h
+          git add src/version.h
           git commit -m "Update QLC version to ${VERSION}"
 
       - name: Push release branch

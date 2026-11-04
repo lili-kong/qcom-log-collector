@@ -9,7 +9,7 @@ on:
       version:
         description: >
           QLC version to release (e.g. 1.2.4). Updates MAJOR/MINOR/PATCH
-          in include/diaglogger/version.h.
+          in src/version.h.
         required: true
         type: string
       base_branch:
@@ -119,12 +119,12 @@ jobs:
           git checkout -b "$BRANCH"
           echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
 
-      # ── 2. Bump version in include/diaglogger/version.h ────────────────────
-      - name: Update include/diaglogger/version.h
+      # ── 2. Bump version in src/version.h ────────────────────────────────────
+      - name: Update src/version.h
         env:
           VERSION: ${{ inputs.version }}
         run: |
-          FILE="include/diaglogger/version.h"
+          FILE="src/version.h"
           MAJOR="${VERSION%%.*}"
           REST="${VERSION#*.}"
           MINOR="${REST%%.*}"
@@ -147,7 +147,7 @@ jobs:
         env:
           VERSION: ${{ inputs.version }}
         run: |
-          git add include/diaglogger/version.h
+          git add src/version.h
           git commit -m "Update QLC version to ${VERSION}"
 
       - name: Push release branch
@@ -190,9 +190,9 @@ jobs:
       matrix:
         include:
           - arch: x64
-            runner: ubuntu-latest
+            runner: ubuntu-22.04
           - arch: arm64
-            runner: ubuntu-24.04-arm
+            runner: ubuntu-22.04-arm
     outputs:
       artifact_x64: qlc_${{ inputs.version }}_linux_x64.tar.gz
       artifact_arm64: qlc_${{ inputs.version }}_linux_arm64.tar.gz
@@ -225,11 +225,11 @@ jobs:
         run: |
           DIR_NAME="qlc_${VERSION}_linux_${ARCH}"
           ARCHIVE="${DIR_NAME}.tar.gz"
-          BIN_DIR="Build/Linux/$(uname -m)/bin"
+          BIN_DIR="build/Linux/$(uname -m)/bin"
 
           if [ ! -f "${BIN_DIR}/qlc" ]; then
             echo "ERROR: Expected binary not found at ${BIN_DIR}/qlc"
-            find Build -type f || true
+            find build -type f || true
             exit 1
           fi
 

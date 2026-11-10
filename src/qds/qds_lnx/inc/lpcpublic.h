@@ -65,6 +65,12 @@ typedef struct _DEVICE_CONTEXT
    USHORT verification_failure;
    ULONG inject_failure;
 
+   /** Constructor: zero-initialises all members (replaces malloc+memset pattern) */
+   _DEVICE_CONTEXT();
+
+   /* loopbk_data, receiveBuf, transferBuf, data_in_file, data_out_file are
+    * externally owned – not freeing it in this constructor       */
+
 } DEVICE_CONTEXT, *PDEVICE_CONTEXT;
 
 typedef void (*TASK_CALLBACK)(PDEVICE_CONTEXT DevInfo);

@@ -1,7 +1,7 @@
 # qualcomm-log-collector - Open-source Qualcomm diag protocol logging tool
 
 cmake_minimum_required(VERSION 3.14)
-project(qualcomm-log-collector VERSION 1.0.0 LANGUAGES CXX)
+project(qualcomm-log-collector VERSION 1.0.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -30,8 +30,25 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${STATIC_LIBRARY_OUTPUT_DIRECTORY})
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${DYNAMIC_LIBRARY_OUTPUT_DIRECTORY})
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${EXECUTABLE_OUTPUT_DIRECTORY})
 
-# Include compiler warning configuration
-include(cmake/CompilerWarnings.cmake)
+# Shared compiler warning flags
+function(set_compiler_warnings target)
+    if(MSVC)
+        target_compile_options(${target} PRIVATE
+            /W4
+            /WX-         # Don't treat warnings as errors (for now)
+            /wd4100      # Unreferenced formal parameter
+            /wd4189      # Local variable initialized but not referenced
+        )
+    else()
+        target_compile_options(${target} PRIVATE
+            -Wall
+            -Wextra
+            -Wpedantic
+            -Wno-unused-parameter
+            -Wno-unused-variable
+        )
+    endif()
+endfunction()
 
 # --- Platform detection ---
 if(WIN32)
@@ -90,6 +107,12 @@ else()
     )
 endif()
 
+# EUD support is shared by the Windows and Linux QDS implementations.
+list(APPEND QDS_SOURCES
+    ${QDS_DIR}/EUD/QdsEud.cpp
+    ${QDS_DIR}/EUD/QdsEud.h
+)
+
 # --- Source files ---
 set(HDLC_SOURCES
     src/hdlc/hdlc.cpp
@@ -145,15 +168,16 @@ set(EXTERNAL_SOURCES
 
 # --- Public API implementation (src/exports/ headers) ---
 # Thin wrappers over the internal engine; the only sources whose declarations
-# are marked QLC_API and exported from the DiagLogger shared library.
+# are marked QLC_API and exported from the shared library.
 set(EXPORTS_SOURCES
     src/device_discovery.cpp
     src/diag_logger.cpp
+    src/DiagLoggerC.cpp
 )
 
-# --- All engine sources (the DLL body; excludes src/cli/) ---
+# --- All engine sources (the library body; excludes src/cli/) ---
 # CLI_SOURCES is deliberately NOT here: argument parsing and help text belong to
-# the qlc executable, not to the DiagLogger library.
+# the qlc executable, not to the SDK library.
 set(ALL_SOURCES
     ${HDLC_SOURCES}
     ${DIAG_SOURCES}
@@ -170,6 +194,8 @@ set(EXPORTS_HEADERS
     src/exports/Definitions.h
     src/exports/device_discovery.h
     src/exports/diag_logger.h
+    src/exports/qlc_export.h
+    src/exports/qlc_diag_logger.h
 )
 
 # --- Common include directories ---
@@ -224,64 +250,66 @@ elseif(UNIX)
     endif()
 endif()
 
-# --- Public API shared library (src/exports/ + internal engine) ---
-# Exports the QLC_API-marked public API (DeviceDiscovery, DiagLogger) for
-# external consumers. Internal engine sources are compiled in with PRIVATE QDS
-# include dirs so those headers do not propagate; consumers see only
-# src/exports/. QLC_DLL_EXPORTS turns QLC_API into dllexport while building
-# this target; the matching import library is DiagLoggerLib.lib.
-add_library(DiagLogger SHARED
+# --- Public SDK libraries: static for qlc, shared for external consumers ---
+# Both flavours use the same sources and export name, matching QIL's target
+# convention. The static archive goes in lib/; the shared library and its
+# Windows import library go in dll/ so their .lib files cannot collide.
+function(qlc_configure_sdk_target target)
+    target_include_directories(${target}
+        PUBLIC ${PROJECT_INCLUDE_DIRS}
+        PRIVATE ${QDS_INCLUDE_DIRS}
+    )
+    target_link_libraries(${target} PRIVATE ${PLATFORM_LIBS})
+    set_compiler_warnings(${target})
+    set_target_properties(${target} PROPERTIES
+        POSITION_INDEPENDENT_CODE ON
+        OUTPUT_NAME "DiagLoggerLib"
+    )
+endfunction()
+
+# Static flavour: linked into qlc and available to static SDK consumers.
+add_library(DiagLoggerLib STATIC
     ${EXPORTS_SOURCES}
     ${EXPORTS_HEADERS}
     ${ALL_SOURCES}
 )
-target_include_directories(DiagLogger
-    PUBLIC ${PROJECT_INCLUDE_DIRS}
-    PRIVATE ${QDS_INCLUDE_DIRS}
+qlc_configure_sdk_target(DiagLoggerLib)
+target_compile_definitions(DiagLoggerLib PUBLIC QLC_STATIC)
+set_target_properties(DiagLoggerLib PROPERTIES
+    ARCHIVE_OUTPUT_DIRECTORY ${STATIC_LIBRARY_OUTPUT_DIRECTORY}
 )
-target_link_libraries(DiagLogger PRIVATE ${PLATFORM_LIBS})
-target_compile_definitions(DiagLogger PRIVATE QLC_DLL_EXPORTS)
-set_compiler_warnings(DiagLogger)
-set_target_properties(DiagLogger PROPERTIES OUTPUT_NAME "DiagLoggerLib")
-set_target_properties(DiagLogger PROPERTIES
+
+# Shared flavour: exported SDK DLL/shared object for external consumers.
+add_library(DiagLoggerLibShared SHARED
+    ${EXPORTS_SOURCES}
+    ${EXPORTS_HEADERS}
+    ${ALL_SOURCES}
+)
+qlc_configure_sdk_target(DiagLoggerLibShared)
+target_compile_definitions(DiagLoggerLibShared PRIVATE QLC_DLL_EXPORTS)
+set_target_properties(DiagLoggerLibShared PROPERTIES
+    CXX_VISIBILITY_PRESET hidden
+    VISIBILITY_INLINES_HIDDEN ON
     RUNTIME_OUTPUT_DIRECTORY ${DYNAMIC_LIBRARY_OUTPUT_DIRECTORY}
     LIBRARY_OUTPUT_DIRECTORY ${DYNAMIC_LIBRARY_OUTPUT_DIRECTORY}
     ARCHIVE_OUTPUT_DIRECTORY ${DYNAMIC_LIBRARY_OUTPUT_DIRECTORY}
 )
 
-# --- Public API static library ---
-# Keep a static build of the same public API and engine sources for qlc. This
-# preserves a self-contained CLI while also producing the shared library for
-# external consumers.
-add_library(DiagLoggerStatic STATIC
-    ${EXPORTS_SOURCES}
-    ${EXPORTS_HEADERS}
-    ${ALL_SOURCES}
-)
-target_include_directories(DiagLoggerStatic
-    PUBLIC ${PROJECT_INCLUDE_DIRS}
-    PRIVATE ${QDS_INCLUDE_DIRS}
-)
-target_link_libraries(DiagLoggerStatic PRIVATE ${PLATFORM_LIBS})
-target_compile_definitions(DiagLoggerStatic PRIVATE QLC_STATIC)
-set_compiler_warnings(DiagLoggerStatic)
-set_target_properties(DiagLoggerStatic PROPERTIES
-    OUTPUT_NAME "DiagLoggerLib"
-    ARCHIVE_OUTPUT_DIRECTORY ${STATIC_LIBRARY_OUTPUT_DIRECTORY}
-)
+# Keep the former in-tree target names usable for add_subdirectory consumers.
+add_library(DiagLogger ALIAS DiagLoggerLibShared)
+add_library(DiagLoggerStatic ALIAS DiagLoggerLib)
 
 # --- CLI executable ---
 # Only the CLI translation units; every diag/transport/protocol source is
-# provided by the statically linked DiagLogger library.
+# provided by the statically linked DiagLoggerLib library.
 add_executable(qlc
     src/cli/main.cpp
     ${CLI_SOURCES}
 )
 target_include_directories(qlc PRIVATE ${PROJECT_INCLUDE_DIRS})
-# QLC_STATIC keeps the public API declarations compatible with the static
-# library; the executable does not depend on the DiagLogger DLL at runtime.
-target_compile_definitions(qlc PRIVATE QLC_STATIC)
-target_link_libraries(qlc PRIVATE DiagLoggerStatic kLogger)
+# QLC_STATIC is propagated by the static library target; qlc does not depend on
+# the shared DLL at runtime.
+target_link_libraries(qlc PRIVATE DiagLoggerLib kLogger)
 set_compiler_warnings(qlc)
 
 # --- Tests ---

@@ -57,6 +57,7 @@ libusb_ref_device_t           fn_libusb_ref_device = nullptr;
 libusb_has_capability_t       fn_libusb_has_capability = nullptr;
 libusb_hotplug_register_callback_t
 fn_libusb_hotplug_register_callback = nullptr;
+libusb_hotplug_deregister_callback_t fn_libusb_hotplug_deregister_callback = nullptr;
 libusb_error_name_t           fn_libusb_error_name = nullptr;
 libusb_strerror_t             fn_libusb_strerror = nullptr;
 libusb_free_config_descriptor_t
@@ -67,7 +68,8 @@ libusb_detach_kernel_driver_t fn_libusb_detach_kernel_driver = nullptr;
 libusb_claim_interface_t      fn_libusb_claim_interface = nullptr;
 libusb_release_interface_t    fn_libusb_release_interface = nullptr;
 libusb_clear_halt_t           fn_libusb_clear_halt = nullptr;
-libusb_get_port_numbers_t     fn_libusb_get_port_numbers = nullptr;
+libusb_get_port_numbers_t                   fn_libusb_get_port_numbers = nullptr;
+libusb_handle_events_timeout_completed_t    fn_libusb_handle_events_timeout_completed = nullptr;
 
 
 bool load_libusb()
@@ -106,11 +108,53 @@ bool load_libusb()
 #else
     if (g_libusb_handle)
         return true;
+    /* Try RTLD_NOLOAD first: if libusb is already mapped (e.g. because the
+     * caller's dylib was linked directly with -lusb-1.0), reuse that handle
+     * instead of opening a second conflicting copy with RTLD_LOCAL.
+     * On both macOS and Linux dlopen(path, RTLD_NOLOAD) returns the existing
+     * handle (and increments its ref-count) without remapping the library. */
+    const char* noload_libs[] = {
+        "/Applications/Qualcomm/QUTS/QUTS.app/Contents/Frameworks/libusb-1.0.0.dylib",
+        /* macOS — Intel Homebrew (present on the test machine) */
+        "/usr/local/opt/libusb/lib/libusb-1.0.0.dylib",
+        /* macOS — Apple Silicon Homebrew */
+        "/opt/homebrew/opt/libusb/lib/libusb-1.0.0.dylib",
+        /* macOS bare name */
+        "libusb-1.0.0.dylib",
+        /* Linux */
+        "libusb-1.0.so.0",
+        "libusb-1.0.so",
+    };
+    for (auto lib : noload_libs) {
+        void *probe = dlopen(lib, RTLD_NOLOAD | RTLD_NOW | RTLD_GLOBAL);
+        if (probe) {
+            /* Library already mapped.  Use RTLD_DEFAULT so that dlsym
+             * resolves through the process-global symbol table — the same
+             * binding the dylib's own direct-link references use.  Using
+             * the RTLD_LOCAL/NOLOAD handle here gives a different address
+             * than the compile-time stub, causing a crash on first call. */
+            dlclose(probe); /* release the NOLOAD ref-count increment */
+            g_libusb_handle = RTLD_DEFAULT;
+            fprintf(stderr, "[load_libusb] libusb already mapped; using RTLD_DEFAULT for dlsym\n");
+            break;
+        }
+    }
+    /* Only do a fresh dlopen if RTLD_NOLOAD found nothing. */
+    if (!g_libusb_handle) {
     const char* libs[] = {
+        "/Applications/Qualcomm/QUTS/QUTS.app/Contents/Frameworks/libusb-1.0.0.dylib",
+        /* Linux */
         "libusb-1.0.so.0",
         "libusb-1.0.so",
         "/usr/lib/libusb-1.0.so.0",
-        "/usr/lib64/libusb-1.0.so.0"
+        "/usr/lib64/libusb-1.0.so.0",
+        /* macOS — Apple Silicon (Homebrew) */
+        "/opt/homebrew/opt/libusb/lib/libusb-1.0.0.dylib",
+        /* macOS — Intel (Homebrew) */
+        "/usr/local/opt/libusb/lib/libusb-1.0.0.dylib",
+        /* macOS — MacPorts / system fallback */
+        "/opt/local/lib/libusb-1.0.0.dylib",
+        "libusb-1.0.0.dylib",
     };
     for (auto lib : libs) {
         g_libusb_handle = dlopen(lib, RTLD_NOW | RTLD_LOCAL);
@@ -126,6 +170,7 @@ bool load_libusb()
     else {
         Utils::QCD_Printf(Utils::Info, "Successfully loaded libusb-1.0.so.0.\n");
     }
+    } /* end if (!g_libusb_handle) — fresh dlopen block */
 #endif // QCOM_WIN_ENV
     LOAD_SYM(libusb_init);
     LOAD_SYM(libusb_exit);
@@ -143,6 +188,7 @@ bool load_libusb()
     LOAD_SYM(libusb_ref_device);
     LOAD_SYM(libusb_has_capability);
     LOAD_SYM(libusb_hotplug_register_callback);
+    LOAD_SYM(libusb_hotplug_deregister_callback);
     LOAD_SYM(libusb_error_name);
     LOAD_SYM(libusb_strerror);
     LOAD_SYM(libusb_free_config_descriptor);
@@ -152,6 +198,7 @@ bool load_libusb()
     LOAD_SYM(libusb_release_interface);
     LOAD_SYM(libusb_clear_halt);
     LOAD_SYM(libusb_get_port_numbers);
+    LOAD_SYM(libusb_handle_events_timeout_completed);
     return true;
 }
 
@@ -172,15 +219,16 @@ void unload_libusb()
             "FreeLibrary succeeded\n");
     }
     g_libusb_handle = nullptr;
-#else 
-    if (dlclose(g_libusb_handle) != 0) {
-        const char* err = dlerror();
-        Utils::QCD_Printf(Utils::Error,
-            "dlclose failed: %s\n", err ? err : "unknown error");
-    }
-    else {
-        Utils::QCD_Printf(Utils::Info,
-            "dlclose succeeded\n");
+#else
+    /* RTLD_DEFAULT is a sentinel, not a real handle — never pass it to dlclose. */
+    if (g_libusb_handle && g_libusb_handle != RTLD_DEFAULT) {
+        if (dlclose(g_libusb_handle) != 0) {
+            const char* err = dlerror();
+            Utils::QCD_Printf(Utils::Error,
+                "dlclose failed: %s\n", err ? err : "unknown error");
+        } else {
+            Utils::QCD_Printf(Utils::Info, "dlclose succeeded\n");
+        }
     }
     g_libusb_handle = nullptr;
 #endif // QCOM_WIN_ENV
@@ -200,6 +248,7 @@ void unload_libusb()
     fn_libusb_ref_device = nullptr;
     fn_libusb_has_capability = nullptr;
     fn_libusb_hotplug_register_callback = nullptr;
+    fn_libusb_hotplug_deregister_callback = nullptr;
     fn_libusb_error_name = nullptr;
     fn_libusb_strerror = nullptr;
     fn_libusb_free_config_descriptor = nullptr;
@@ -209,4 +258,5 @@ void unload_libusb()
     fn_libusb_release_interface = nullptr;
     fn_libusb_clear_halt = nullptr;
     fn_libusb_get_port_numbers = nullptr;
+    fn_libusb_handle_events_timeout_completed = nullptr;
 }

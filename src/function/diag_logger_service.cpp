@@ -189,12 +189,8 @@ void DiagLoggerService::print_session_summary() {
     CFLOG_INFO("TX bytes:    " + std::to_string(s.tx_bytes), true);
     CFLOG_INFO("Frame errors: " + std::to_string(s.frame_errors), true);
 
-    // Diag capture (.diag). Prefer the actual file path from kLogger; fall back
-    // to the port trace path if kLogger hasn't opened a file yet.
-    std::string diag_file = KL::Logger::get_instance().get_current_ptrace_file();
-    if (diag_file.empty() && diag_) {
-        diag_file = diag_->ptrace_path();
-    }
+    // The DIAG port trace is written directly by PtraceWriter.
+    std::string diag_file = diag_ ? diag_->ptrace_path() : std::string();
     CFLOG_INFO("Diag file:   " + diag_file, true);
     if (diag_) {
         CFLOG_INFO("Diag records:" + std::to_string(diag_->ptrace_record_count()), true);
@@ -672,6 +668,14 @@ bool DiagLoggerService::post_open_setup() {
             verbose_log("Setup: ADPL setup failed");
             return false;
         }
+    }
+
+    // 11. Write .qlc metadata file (non-fatal). Once per session only —
+    // post_open_setup re-runs on reboot recovery, but the .qlc (like the
+    // continuous .diag) should not be duplicated.
+    if (!qlc_written_) {
+        write_qlc_file();
+        qlc_written_ = true;
     }
 
     verbose_log("Device setup complete.");
@@ -1166,7 +1170,6 @@ void DiagLoggerService::download_qshrink_files() {
             std::string msg = "QShrink4 [" + comp + "] download FAILED (open): guid=" + guid_str
                 + " (no delayed response)";
             CFLOG_ERROR(msg, true);
-            std::cout << msg << std::endl;
             qshrink_capturing_.store(false);
             clear_qshrink_queue();
             continue;
@@ -1177,7 +1180,6 @@ void DiagLoggerService::download_qshrink_files() {
             std::string msg = "QShrink4 [" + comp + "] download FAILED (open): guid=" + guid_str
                 + " status=" + std::to_string(open_r.status);
             CFLOG_ERROR(msg, true);
-            std::cout << msg << std::endl;
             qshrink_capturing_.store(false);
             clear_qshrink_queue();
             continue;
@@ -1252,7 +1254,6 @@ void DiagLoggerService::download_qshrink_files() {
                 + " got " + std::to_string(total_bytes) + "/" + std::to_string(entry.file_length)
                 + " bytes";
             CFLOG_ERROR(msg, true);
-            std::cout << msg << std::endl;
             continue;
         }
         CFLOG_INFO("QShrink4 [" + comp + "] FILE_READ ok: " + std::to_string(total_bytes) +
@@ -1263,14 +1264,12 @@ void DiagLoggerService::download_qshrink_files() {
         if (!validate_qdb_header(qdb, file_guid)) {
             std::string msg = "QShrink4 [" + comp + "] download FAILED (bad .qdb header): guid=" + guid_str;
             CFLOG_ERROR(msg, true);
-            std::cout << msg << std::endl;
             continue;
         }
         std::string out_path = dir + "msg_hash_" + guid_to_string(file_guid) + ".qsr4";
         if (!decompress_qdb_to_qsr4(qdb, out_path)) {
             std::string msg = "QShrink4 [" + comp + "] download FAILED (decompress): guid=" + guid_str;
             CFLOG_ERROR(msg, true);
-            std::cout << msg << std::endl;
             continue;
         }
 

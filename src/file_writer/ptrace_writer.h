@@ -20,8 +20,13 @@
 #define QC_PTRACE_WRITER_H
 
 #include <cstdint>
+#include <condition_variable>
+#include <fstream>
 #include <mutex>
+#include <queue>
 #include <string>
+#include <thread>
+#include <vector>
 
 #include "types.h"
 
@@ -68,12 +73,25 @@ public:
     const std::string& path() const { return path_; }
 
 private:
+    void writer_loop();
+    bool open_new_file();
+    void write_line(const std::string& line);
+
     std::string path_;
+    std::string output_directory_;
     std::string device_description_;
+    std::vector<std::string> header_lines_;
     std::mutex mutex_;
+    std::condition_variable cv_;
+    std::queue<std::string> pending_lines_;
+    std::thread writer_thread_;
+    std::ofstream stream_;
     uint64_t record_count_ = 0;
     uint64_t bytes_written_ = 0;
+    uint64_t file_bytes_written_ = 0;
+    size_t file_sequence_ = 0;
     bool is_open_{false};
+    bool stopping_{false};
 
     /// Format current local time as "YYYY/MM/DD HH:MM:SS.mmm".
     static std::string now_as_timestamp();

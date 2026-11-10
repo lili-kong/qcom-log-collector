@@ -8,6 +8,7 @@ enum class LogOption : std::uint32_t
 {
    None = 0,
    DebugToFile = 1u << 0, // write DEBUG messages to the file sink
+   ConsoleToStderr = 1u << 1, // route console messages to stderr instead of stdout
 };
 
 inline LogOption operator|(LogOption lhs, LogOption rhs) noexcept

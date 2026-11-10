@@ -29,6 +29,7 @@
 #include <libudev.h>
 #include "qdutils.h"
 #include <pthread.h>
+#include <memory>
 #include <sys/socket.h>
 #include <signal.h>
 #include <time.h>
@@ -38,6 +39,10 @@
 #include <net/if.h>
 #include <arpa/inet.h>
 #include "../../libusb/source/qcom-libusb.h"
+#include "../../EUD/QdsEud.h"
+#ifdef ALPACA
+#include "AlpacaDeviceDiscovery.h"
+#endif
 
 using namespace Utils;
 
@@ -72,8 +77,400 @@ FILE *fp = NULL;
 #endif
 QcdevCtx qcdevCtx = {NULL, NULL,
                      NULL, NULL, NULL, NULL, NULL, PTHREAD_MUTEX_INITIALIZER, -1, 0, 0, 0, NULL};
-QcomLibUSBdevCtx qcom_dev;
 int log_level = 0;
+
+static bool      g_libusb_event_running = false;
+static pthread_t g_libusb_event_thread;
+
+/* -----------------------------------------------------------------------
+ * EUD pending-arrival list
+ * EUD devices that arrived before their parent USB composite device.
+ * Protected by eudPendingLock_.
+ * ----------------------------------------------------------------------- */
+struct EudPendingItem {
+    EUD_DEVICE_INFO info;
+    EudPendingItem  *next;
+    EudPendingItem() {
+        next = NULL;
+    }
+};
+static EudPendingItem    *g_eudPendingHead = NULL;
+static pthread_mutex_t    g_eudPendingLock = PTHREAD_MUTEX_INITIALIZER;
+
+/* Forward declarations */
+static void ProcessPendingEudArrivals(void);
+static void pushToDeviceCtx(PDeviceCtx deviceCtx);
+static void popFromDeviceCtx(PVOID devContextInt);
+static void *fetchFromDeviceCtx(PVOID devNode);
+
+/*
+ * @brief Check whether the EUD shared library is present on disk.
+ *
+ * Used access() to check file-existence without loading the library
+ *
+ * When EUD is installed, QDS must NOT call load_libusb() / initialize_libusb()
+ * because both EUD and qcom-libusb dynamically load the same system libusb.so.
+ * A double libusb_init / libusb_exit on the shared instance corrupts the
+ * internal reference count and causes crashes or silent failures.
+ *
+ * @returns true  if libeud.so exists (EUD will load libusb).
+ * @returns false if libeud.so is absent (qcom-libusb will load libusb).
+ */
+static bool IsEudLibPresent()
+{
+    const char *eudPath = GetEudLibPath();
+    if (eudPath == nullptr)
+        return false;
+    return (access(eudPath, F_OK) == 0);
+}
+
+/* -----------------------------------------------------------------------
+ * EudDeviceChangeCb
+ *   Invoked by EUD.so's monitor thread on peripheral arrival/departure.
+ * ----------------------------------------------------------------------- */
+static void EudDeviceChangeCb(const EUD_DEVICE_INFO *info)
+{
+    if (!info) return;
+
+    if (strnlen(info->device_name, EUD_MAX_DEVICE_NAME) >= EUD_MAX_DEVICE_NAME)
+    {
+        QCDEV_LOG_ERR("EudDeviceChangeCb: device_name not null-terminated or exceeds max length\n");
+        return;
+    }
+
+    if (info->flag == 1)
+    {
+        /* ---- ARRIVAL ---- */
+        /* Compute correct SerNumMsm */
+        char corrSerNumMsm[9];
+        ConvertDeviceIdToSerNumMsm(info->device_id, corrSerNumMsm, sizeof(corrSerNumMsm));
+
+        /* Check if parent USB device is already in qcdevCtx */
+        bool parentPresent = false;
+        pthread_mutex_lock(&qcdevCtx.mListLock);
+        PDeviceCtx t = qcdevCtx.mpDeviceCtx;
+        while (t)
+        {
+            if (t->mDevParams.SerNumMsm[0] != '\0' &&
+                strcasecmp(t->mDevParams.SerNumMsm, corrSerNumMsm) == 0)
+            {
+                parentPresent = true;
+                break;
+            }
+            t = t->mNext;
+        }
+        pthread_mutex_unlock(&qcdevCtx.mListLock);
+
+        if (parentPresent && qcdevCtx.mCallback)
+        {
+            /* Fire immediately */
+            CB_PARAMS cbp;
+            cbp.DevDesc  = (PCHAR)info->device_name;
+            cbp.DevName  = (PCHAR)info->device_name;
+            cbp.SerNumMsm = new char[strlen(corrSerNumMsm) + 1];
+            strcpy(cbp.SerNumMsm, corrSerNumMsm);
+            cbp.Flag = ((ULONG)QC_DEV_TYPE_EUD << 8) |
+                       ((ULONG)QC_DEV_STATE_ARRIVAL << 4) | (ULONG)1;
+            cbp.DevDetails = std::make_unique<DevDetailsMap>();
+            PVOID ctx = qcdevCtx.mCallbackCtx;
+            QCDEV_LOG_INFO("EUD ARRIVAL (immediate): %s SerNumMsm=%s\n",
+                           info->device_name, corrSerNumMsm);
+            qcdevCtx.mCallback(&cbp, &ctx);
+            delete [] cbp.SerNumMsm;
+            cbp.SerNumMsm = NULL;
+
+            /* Add EUD device to the device list so GetDeviceList can report it */
+            PDeviceCtx pEudCtx = new _DeviceCtx();
+            if (pEudCtx)
+            {
+                strncpy(pEudCtx->mDevParams.DevDesc, info->device_name, QCDEV_MAX_VALUE_NAME - 1);
+                pEudCtx->mDevParams.DevDesc[QCDEV_MAX_VALUE_NAME - 1] = '\0';
+                pEudCtx->mDevParams.DevDescBufLen = strlen(pEudCtx->mDevParams.DevDesc);
+                strncpy(pEudCtx->mDevParams.DevName, info->device_name, QCDEV_MAX_VALUE_NAME - 1);
+                pEudCtx->mDevParams.DevName[QCDEV_MAX_VALUE_NAME - 1] = '\0';
+                pEudCtx->mDevParams.DevnameBufLen = strlen(pEudCtx->mDevParams.DevName);
+                strncpy(pEudCtx->mDevParams.SerNumMsm, corrSerNumMsm, QCDEV_MAX_VALUE_NAME - 1);
+                pEudCtx->mDevParams.SerNumMsm[QCDEV_MAX_VALUE_NAME - 1] = '\0';
+                pEudCtx->mDevParams.SerNumMsmBufLen = strlen(pEudCtx->mDevParams.SerNumMsm);
+                pEudCtx->mDevParams.Flag = ((ULONG)QC_DEV_TYPE_EUD << 8) |
+                                           ((ULONG)QC_DEV_STATE_ARRIVAL << 4) | (ULONG)1;
+                pEudCtx->mDevParams.DevDetails =
+                                            std::make_unique<std::unordered_map<std::string, std::string>>();
+                strncpy(pEudCtx->mDevNode, info->device_name, QCDEV_MAX_VALUE_NAME - 1);
+                pEudCtx->mDevNode[QCDEV_MAX_VALUE_NAME - 1] = '\0';
+                pEudCtx->mContextInt = (PVOID)(intptr_t)(++qcdevCtx.mDevidx);
+                pushToDeviceCtx(pEudCtx);
+            }
+        }
+        else
+        {
+            /* Queue as pending */
+            EudPendingItem *item = new EudPendingItem();
+            if (item)
+            {
+                item->info = *info;
+                /* Store corrected SerNumMsm in serial_id for later use */
+                strncpy(item->info.serial_id, corrSerNumMsm, EUD_MAX_SERIAL_ID - 1);
+                item->info.serial_id[EUD_MAX_SERIAL_ID - 1] = '\0';
+                pthread_mutex_lock(&g_eudPendingLock);
+                item->next = g_eudPendingHead;
+                g_eudPendingHead = item;
+                pthread_mutex_unlock(&g_eudPendingLock);
+                QCDEV_LOG_INFO("EUD ARRIVAL deferred (waiting for USB parent): %s SerNumMsm=%s\n",
+                               info->device_name, corrSerNumMsm);
+            }
+        }
+    }
+    else
+    {
+        /* ---- DEPARTURE ---- */
+        if (qcdevCtx.mCallback)
+        {
+            char corrSerNumMsm[9];
+            ConvertDeviceIdToSerNumMsm(info->device_id, corrSerNumMsm, sizeof(corrSerNumMsm));
+
+            CB_PARAMS cbp;
+            cbp.DevDesc   = (PCHAR)info->device_name;
+            cbp.DevName   = (PCHAR)info->device_name;
+            cbp.SerNumMsm = new char[strlen(corrSerNumMsm) + 1];
+            strcpy(cbp.SerNumMsm, corrSerNumMsm);
+            cbp.Flag = ((ULONG)QC_DEV_TYPE_EUD << 8) |
+                       ((ULONG)QC_DEV_STATE_DEPARTURE << 4) | (ULONG)1;
+            cbp.DevDetails = std::make_unique<DevDetailsMap>();
+            PVOID ctx = qcdevCtx.mCallbackCtx;
+            QCDEV_LOG_INFO("EUD DEPARTURE: %s SerNumMsm=%s\n",
+                           info->device_name, corrSerNumMsm);
+            qcdevCtx.mCallback(&cbp, &ctx);
+            delete [] cbp.SerNumMsm;
+            cbp.SerNumMsm = NULL;
+        }
+
+        /* Remove from pending list if it was never promoted */
+        pthread_mutex_lock(&g_eudPendingLock);
+        EudPendingItem *prev = NULL, *cur = g_eudPendingHead;
+        while (cur)
+        {
+            if (strcmp(cur->info.device_name, info->device_name) == 0)
+            {
+                if (prev) prev->next = cur->next;
+                else      g_eudPendingHead = cur->next;
+                delete cur;
+                break;
+            }
+            prev = cur;
+            cur  = cur->next;
+        }
+        pthread_mutex_unlock(&g_eudPendingLock);
+
+        /* Reset the cached device ID when the CTL peripheral departs.
+         * CTL represents the EUD device itself; when it departs the
+         * device has disconnected and the next initializeEudTrace()
+         * must re-query get_device_id_array for the new device ID. */
+        if (info->peripheral_type == EUD_PERIPH_TYPE_CTL)
+        {
+            QcEud_ResetDeviceId();
+        }
+
+        /* Remove from handle map if the device was opened */
+        QcEud_RemoveByName((PVOID)info->device_name);
+
+        /* Remove EUD device from the device list */
+        PDeviceCtx pEudCtx = (PDeviceCtx)fetchFromDeviceCtx((PVOID)info->device_name);
+        if (pEudCtx)
+        {
+            PVOID ctxInt = pEudCtx->mContextInt;
+            popFromDeviceCtx(ctxInt);
+        }
+    }
+}
+
+/* -----------------------------------------------------------------------
+ * ProcessPendingEudArrivals
+ *   Called after each device scan.  Promotes pending EUD items whose
+ *   parent USB device has now appeared in qcdevCtx.mpDeviceCtx.
+ * ----------------------------------------------------------------------- */
+static void ProcessPendingEudArrivals(void)
+{
+    pthread_mutex_lock(&qcdevCtx.mListLock);
+    pthread_mutex_lock(&g_eudPendingLock);
+    EudPendingItem *prev = NULL, *cur = g_eudPendingHead;
+    while (cur)
+    {
+        const char *corrSerNumMsm = cur->info.serial_id; /* stored at arrival */
+        bool parentFound = false;
+
+        PDeviceCtx t = qcdevCtx.mpDeviceCtx;
+        while (t)
+        {
+            if (t->mDevParams.SerNumMsm[0] != '\0' &&
+                strcasecmp(t->mDevParams.SerNumMsm, corrSerNumMsm) == 0)
+            {
+                parentFound = true;
+                break;
+            }
+            t = t->mNext;
+        }
+
+        if (parentFound)
+        {
+            /* Promote: fire callback */
+            if (qcdevCtx.mCallback)
+            {
+                CB_PARAMS cbp;
+                cbp.DevDesc   = (PCHAR)cur->info.device_name;
+                cbp.DevName   = (PCHAR)cur->info.device_name;
+                cbp.SerNumMsm = new char[strlen(corrSerNumMsm) + 1];
+                strcpy(cbp.SerNumMsm, corrSerNumMsm);
+                cbp.Flag = ((ULONG)QC_DEV_TYPE_EUD << 8) |
+                           ((ULONG)QC_DEV_STATE_ARRIVAL << 4) | (ULONG)1;
+                cbp.DevDetails = std::make_unique<DevDetailsMap>();
+                PVOID ctx = qcdevCtx.mCallbackCtx;
+                QCDEV_LOG_INFO("EUD ARRIVAL (deferred, parent now present): %s SerNumMsm=%s\n",
+                               cur->info.device_name, corrSerNumMsm);
+                qcdevCtx.mCallback(&cbp, &ctx);
+
+                delete [] cbp.SerNumMsm;
+                cbp.SerNumMsm = NULL;
+            }
+
+            /* Add EUD device to the device list (lock already held, inline push) */
+            PDeviceCtx pEudCtx = new _DeviceCtx();
+            if (pEudCtx)
+            {
+                strncpy(pEudCtx->mDevParams.DevDesc, cur->info.device_name, QCDEV_MAX_VALUE_NAME - 1);
+                pEudCtx->mDevParams.DevDesc[QCDEV_MAX_VALUE_NAME - 1] = '\0';
+                pEudCtx->mDevParams.DevDescBufLen = strlen(pEudCtx->mDevParams.DevDesc);
+                strncpy(pEudCtx->mDevParams.DevName, cur->info.device_name, QCDEV_MAX_VALUE_NAME - 1);
+                pEudCtx->mDevParams.DevName[QCDEV_MAX_VALUE_NAME - 1] = '\0';
+                pEudCtx->mDevParams.DevnameBufLen = strlen(pEudCtx->mDevParams.DevName);
+                strncpy(pEudCtx->mDevParams.SerNumMsm, corrSerNumMsm, QCDEV_MAX_VALUE_NAME - 1);
+                pEudCtx->mDevParams.SerNumMsm[QCDEV_MAX_VALUE_NAME - 1] = '\0';
+                pEudCtx->mDevParams.SerNumMsmBufLen = strlen(pEudCtx->mDevParams.SerNumMsm);
+                pEudCtx->mDevParams.Flag = ((ULONG)QC_DEV_TYPE_EUD << 8) |
+                                           ((ULONG)QC_DEV_STATE_ARRIVAL << 4) | (ULONG)1;
+                pEudCtx->mDevParams.DevDetails =
+                                            std::make_unique<std::unordered_map<std::string, std::string>>();
+                strncpy(pEudCtx->mDevNode, cur->info.device_name, QCDEV_MAX_VALUE_NAME - 1);
+                pEudCtx->mDevNode[QCDEV_MAX_VALUE_NAME - 1] = '\0';
+                pEudCtx->mContextInt = (PVOID)(intptr_t)(++qcdevCtx.mDevidx);
+                /* Inline push since qcdevCtx.mListLock is already held */
+                if (NULL == qcdevCtx.mpDeviceCtx)
+                    qcdevCtx.mpDeviceCtx = pEudCtx;
+                else
+                {
+                    pEudCtx->mNext = (PDeviceCtx)qcdevCtx.mpDeviceCtx;
+                    qcdevCtx.mpDeviceCtx = pEudCtx;
+                }
+            }
+
+            /* Remove from pending list */
+            EudPendingItem *toFree = cur;
+            if (prev) prev->next = cur->next;
+            else      g_eudPendingHead = cur->next;
+            cur = cur->next;
+            delete toFree;
+        }
+        else
+        {
+            prev = cur;
+            cur  = cur->next;
+        }
+    }
+    pthread_mutex_unlock(&g_eudPendingLock);
+    pthread_mutex_unlock(&qcdevCtx.mListLock);
+}
+/**
+ * @brief   Map a raw bInterfaceProtocol byte to its DEV_CLASS_* owner.
+ *
+ * Adding a new protocol family: add a case here and add the corresponding
+ * DEV_CLASS_* bit in qdpublic.h
+ */
+static ULONG ProtocolToDeviceClass(ULONG ifaceProtocol)
+{
+    switch (ifaceProtocol & DEV_PROTOCOL_MAJOR_REVISION_MASK)
+    {
+        case 0x10: return DEV_CLASS_SAHARA;  /* 0x10-0x1F Sahara family + Firehose 0x20 */
+        case 0x20: return DEV_CLASS_SAHARA;  /* DEV_PROTOCOL_FIREHOSE */
+        case 0x30: return DEV_CLASS_PORTS;   /* DEV_PROTOCOL_DIAG     */
+        case 0x40: return DEV_CLASS_PORTS;   /* DEV_PROTOCOL_DUN      */
+        case 0x50: return DEV_CLASS_NET;     /* DEV_PROTOCOL_RMNET    */
+        case 0x60: return DEV_CLASS_PORTS;   /* DEV_PROTOCOL_NMEA     */
+        case 0x70: return DEV_CLASS_USB;     /* DEV_PROTOCOL_QDSS     */
+        case 0x80: return DEV_CLASS_USB;     /* DEV_PROTOCOL_ADPL     */
+        default:   return 0;
+    }
+}
+
+/**
+ * @brief   Map a raw bInterfaceProtocol byte to its DEV_PROTOCOL_MASK_* bit.
+ *
+ * Used for sub-protocol narrowing within DEV_CLASS_SAHARA when
+ * mSetting->DeviceProtocol != 0.
+ */
+static ULONG ProtocolToMask(ULONG ifaceProtocol)
+{
+    switch (ifaceProtocol)
+    {
+        case DEV_PROTOCOL_SAHARA:                          return DEV_PROTOCOL_MASK_SAHARA;
+        case DEV_PROTOCOL_SAHARA_PBL_EMERGENCY_DOWNLOAD:  return DEV_PROTOCOL_MASK_EDL;
+        case DEV_PROTOCOL_SAHARA_PBL_FLASHLESS_BOOT:      return DEV_PROTOCOL_MASK_FLASHLESS_BOOT;
+        case DEV_PROTOCOL_SAHARA_SBL_XBL_RAMDUMP:         return DEV_PROTOCOL_MASK_RAMDUMP;
+        case DEV_PROTOCOL_SAHARA_TN_APPS_Remote_EFS:      return DEV_PROTOCOL_MASK_EFS;
+        case DEV_PROTOCOL_FIREHOSE:                       return DEV_PROTOCOL_MASK_FIREHOSE;
+        default:                                           return 0;
+    }
+}
+
+/**
+ * @brief   Common protocol-level gate for both kernel and userspace paths.
+ *
+ * Rules:
+ *   DeviceClass == 0            → accept all (no filter active)
+ *   protocol == 0               → composite device node, always accept
+ *   protocol not in class map   → reject (unknown protocol)
+ *   protocol class not in
+ *     mSetting->DeviceClass     → reject (class not subscribed)
+ *   DeviceClass has SAHARA and
+ *   DeviceProtocol != 0         → accept only if protocol mask bit is set
+ *
+ * To add a new DEV_CLASS_*: add a row to ProtocolToDeviceClass()
+ *
+ * @param   protocol  Raw 32-bit protocol field (bits[7:0] = bInterfaceProtocol).
+ * @returns true  — device passes filter, continue processing.
+ *          false — device rejected, discard without pushToDeviceCtx.
+ */
+static bool IsDeviceAllowed(ULONG protocol)
+{
+    if (!qcdevCtx.mSetting || qcdevCtx.mSetting->DeviceClass == 0)
+        return true;
+
+    /* Composite device node (protocol == 0) — always allow */
+    if (protocol == 0)
+        return true;
+
+    ULONG ifaceProtocol = protocol & 0xFF;
+    ULONG devClass = ProtocolToDeviceClass(ifaceProtocol);
+
+    /* Unknown protocol — reject */
+    if (devClass == 0)
+        return false;
+
+    /* Protocol's class is not in the subscribed DeviceClass — reject */
+    if (!(qcdevCtx.mSetting->DeviceClass & devClass))
+        return false;
+
+    /* Sub-protocol narrowing: only meaningful for DEV_CLASS_SAHARA.
+     * DeviceProtocol == 0 means accept all protocols in the class. */
+    if ((devClass == DEV_CLASS_SAHARA) && (qcdevCtx.mSetting->DeviceProtocol != 0))
+    {
+        ULONG mask = ProtocolToMask(ifaceProtocol);
+        if (!(qcdevCtx.mSetting->DeviceProtocol & mask))
+            return false;
+    }
+
+    return true;
+}
+
 /**
  * @brief   To push the Device details to the Main Ctx
  *
@@ -83,6 +480,19 @@ int log_level = 0;
  *
  * @returns Nothing
  */
+static void *libusb_event_thread_fn(void *arg)
+{
+    struct libusb_context *ctx = (struct libusb_context *)arg;
+    struct timeval tv;
+    tv.tv_sec  = 1;
+    tv.tv_usec = 0;
+    while (g_libusb_event_running) {
+        int completed = 0;
+        fn_libusb_handle_events_timeout_completed(ctx, &tv, &completed);
+    }
+    return nullptr;
+}
+
 static void pushToDeviceCtx(PDeviceCtx deviceCtx)
 {
     QCDEV_LOG_DBG("In\n");
@@ -109,6 +519,15 @@ static void pushToDeviceCtx(PDeviceCtx deviceCtx)
     return;
 }
 
+#ifdef ALPACA
+int AlpacaDiscoveryCallback(DEVICECHANGE_CALLBACK Cb, PVOID AppContext)
+{
+    // set the callback method
+    setAlpacaDiscoveryCallback(Cb, AppContext);
+
+    return 0;
+}
+#endif
 // little helper to parsing message using netlink macroses
 void parseRtattr(struct rtattr *tb[], int max, struct rtattr *rta, int len)
 {
@@ -136,7 +555,7 @@ static void fetchIPAddr(char *ipAddr)
         return;
     }
 
-    while (fread(&c, sizeof(c), 1, fpipe) && id < QCDEV_MAX_VALUE_NAME)
+    while (fread(&c, sizeof(c), 1, fpipe) && id < QCDEV_MAX_VALUE_NAME - 1)
     {
 		if (c != '\n') {
 			ip_addr[id++] = c;
@@ -144,10 +563,13 @@ static void fetchIPAddr(char *ipAddr)
                 		ip_addr[id-1] = (((c - '0') + 1) + '0');
 		} else {
 			ip_addr[id++] = '\0';
+			break;
 		}
     }
+    ip_addr[id] = '\0';
 
-   strncpy(ipAddr, ip_addr, strlen(ip_addr)+1);
+   strncpy(ipAddr, ip_addr, QCDEV_MAX_VALUE_NAME - 1);
+   ipAddr[QCDEV_MAX_VALUE_NAME - 1] = '\0';
 
     pclose(fpipe);
 }
@@ -282,10 +704,8 @@ static void popFromDeviceCtx(PVOID devContextInt)
     prevNode->mNext = traversal->mNext;
 
 end:
-    /* man free() : If ptr is NULL, no operation is performed.
-     * So avoiding the NULL check
-     */
-    free(traversal);
+    /* Destructor of _DeviceCtx handles mDevParams.DevDetails cleanup */
+    delete traversal;
 
     QCDEV_LOG_DBG("Out\n");
 
@@ -362,10 +782,7 @@ static void *getName(const void *devName, const char *serialNum)
             /* Extract based on <SER_NUM>**ttyUSB0 */
             if (strcasestr(dirent_p->d_name, (const char *)(devName)))
             {
-                strncpy(path, DevNode, strlen(DevNode));
-                path[QCDEV_PORT_NAME_LEN - 1] = '\0';
-                strncpy(path + strlen(path), dirent_p->d_name, QCDEV_PORT_NAME_LEN - strlen(path) - 1);
-                path[QCDEV_PORT_NAME_LEN - 1] = '\0';
+                snprintf(path, QCDEV_PORT_NAME_LEN, "%s%s", DevNode, dirent_p->d_name);
                 break;
             }
         }
@@ -424,46 +841,17 @@ static bool extractDevInfo(struct udev_device *device, PDeviceCtx pdeviceCtx)
     struct udev_device *device_parent = device;
     const char *str;
     const char *value;
-    char vendorIdBuf[16] = {0};
-    char productIdBuf[16] = {0};
     char *vendorId = NULL;
-    char *productId = NULL;
 	struct udev_device *devp_tmp = NULL;
     std::unordered_map<std::string, std::string> devDetailsMP;
     if (qcdevCtx.mSetting && qcdevCtx.mSetting->VID)
     {
-        char *ampersand = strchr(qcdevCtx.mSetting->VID, '&');
-        if (ampersand)
+        vendorId = qcdevCtx.mSetting->VID;
+        /* Assuming the format would be VID_05C6 */
+        if (vendorId = strrchr(vendorId, '_'))
         {
-            /* Assuming the format would be VID_05C6&PID_9008 */
-            char *vidStr = strchr(qcdevCtx.mSetting->VID, '_');
-            if (vidStr)
-            {
-                vidStr++;
-                int i = 0;
-                while (vidStr[i] && vidStr[i] != '&' && i < (int)sizeof(vendorIdBuf) - 1)
-                {
-                    vendorIdBuf[i] = vidStr[i];
-                    i++;
-                }
-                vendorIdBuf[i] = '\0';
-                vendorId = vendorIdBuf;
-            }
-            char *pidStr = strchr(ampersand, '_');
-            if (pidStr)
-            {
-                pidStr++;
-                productId = pidStr;
-            }
-        }
-        else
-        {
-            /* Assuming the format would be VID_05C6 */
-            vendorId = qcdevCtx.mSetting->VID;
-            if ((vendorId = strrchr(vendorId, '_')))
-            {
-                vendorId++;
-            }
+            /* Move to the next location */
+            vendorId++;
         }
     }
 
@@ -473,23 +861,13 @@ static bool extractDevInfo(struct udev_device *device, PDeviceCtx pdeviceCtx)
     device_parent = device;
     do
     {
-        value = udev_device_get_sysattr_value(device_parent, "idVendor");
-        if (value)
-        {
-            if (vendorId && strcasecmp(vendorId, value) != 0)
-            {
-                return QCDEV_FALSE;
-            }
-            if (productId)
-            {
-                value = udev_device_get_sysattr_value(device_parent, "idProduct");
-                if (value && strcasecmp(productId, value) != 0)
-                {
-                    return QCDEV_FALSE;
-                }
-            }
+        device_parent = udev_device_get_parent(device_parent);
+        if (device_parent == NULL)
             break;
-        }
+
+        value = udev_device_get_sysattr_value(device_parent, "idVendor");
+        if (value && (!vendorId || !strcasecmp(vendorId, value)))
+            break;
 	if ((!strcasecmp(pdeviceCtx->mSubsystem, SUBSYSTEM_MHI)) ||
 	    (!strcasecmp(pdeviceCtx->mSubsystem, SUBSYSTEM_WWAN)))
 	{
@@ -516,7 +894,6 @@ static bool extractDevInfo(struct udev_device *device, PDeviceCtx pdeviceCtx)
 	   }
 	}
 
-        device_parent = udev_device_get_parent(device_parent);
     } while (device_parent != NULL);
 
     if (device_parent)
@@ -621,10 +998,7 @@ static bool extractDevInfo(struct udev_device *device, PDeviceCtx pdeviceCtx)
                 pdeviceCtx->mProductNameLen = strlen(pdeviceCtx->mProductName);
             }
             ParseDevDesc(pdeviceCtx->mProductName, devDetailsMP);
-            if(pdeviceCtx->mDevParams.DevDetails)
-            {
-                *(pdeviceCtx->mDevParams.DevDetails) = devDetailsMP;
-            }
+            pdeviceCtx->mDevParams.DevDetails = std::make_unique<DevDetailsMap>(devDetailsMP);
         }
 
         value = strcasestr(pdeviceCtx->mProductName, "_CID:");
@@ -717,18 +1091,6 @@ static void processAddDevice(struct udev_device *dev)
 
     devP = udev_device_get_parent(dev);
 
-    if (qcdevCtx.mSetting &&
-        (qcdevCtx.mSetting->Settings & DEV_FEATURE_SCAN_USB_WITH_VID))
-    {
-        struct _DeviceCtx tmpCtx;
-        memset(&tmpCtx, 0, sizeof(tmpCtx));
-        if (QCDEV_FALSE == extractDevInfo(dev, &tmpCtx))
-        {
-            QCDEV_LOG_INFO("Device filtered by VID/PID\n");
-            return;
-        }
-    }
-
     /* In case of TTY susystem vendor Id cannot be obtained directly */
     const char *vendor = udev_device_get_sysattr_value(dev, "idVendor");
     if (!vendor)
@@ -751,16 +1113,15 @@ static void processAddDevice(struct udev_device *dev)
     if (!devNode)
         devNode = "NULL";
 
-    pdeviceCtx = (PDeviceCtx)malloc(sizeof(struct _DeviceCtx));
+    pdeviceCtx = new _DeviceCtx();
     if (NULL == pdeviceCtx)
     {
         QCDEV_LOG_ERR("Failed to allocate memorey\n");
         return;
     }
-    memset(pdeviceCtx, 0, sizeof(struct _DeviceCtx));
 
-    pdeviceCtx->mDevParams.DevDetails = new std::unordered_map<std::string, std::string>();
-    
+    pdeviceCtx->mDevParams.DevDetails = std::make_unique<DevDetailsMap>();
+
     strncpy(pdeviceCtx->mSubsystem, subsystem, QCDEV_MAX_VALUE_NAME - 1);
 
     value = udev_device_get_devpath(dev);
@@ -777,6 +1138,8 @@ static void processAddDevice(struct udev_device *dev)
     getHwID(dev, pdeviceCtx, NULL);
 
     if (strcasestr(subsystem, SUBSYSTEM_TTY) &&
+        qcdevCtx.mSetting &&
+        (qcdevCtx.mSetting->Settings & DEV_FEATURE_INCLUDE_NONE_QC_PORTS) &&
         (!qcdevCtx.mSetting->DeviceClass ||
          (qcdevCtx.mSetting->DeviceClass & DEV_CLASS_PORTS)))
     {
@@ -788,12 +1151,7 @@ static void processAddDevice(struct udev_device *dev)
         if (!strcasestr(devNode, QCDEV_TTY_NAME) ||
             QCDEV_FALSE == extractDevInfo(dev, pdeviceCtx))
         {
-            if (pdeviceCtx->mDevParams.DevDetails) 
-            {
-                delete pdeviceCtx->mDevParams.DevDetails;
-                pdeviceCtx->mDevParams.DevDetails = NULL;
-            }
-            free(pdeviceCtx);
+            delete pdeviceCtx;
             return;
         }
 
@@ -820,12 +1178,7 @@ static void processAddDevice(struct udev_device *dev)
 			bAlternateSetting= [%s], bInterfaceNumber= [%s]\n",
 			bInterfaceProtocol, bInterfaceClass, bAlternateSetting,
 			bInterfaceNumber);
-        if (pdeviceCtx->mDevParams.DevDetails) 
-        {
-            delete pdeviceCtx->mDevParams.DevDetails;
-            pdeviceCtx->mDevParams.DevDetails = NULL;
-        }
-	    free(pdeviceCtx);
+	    delete pdeviceCtx;
 	    return;
 	}
 
@@ -835,26 +1188,19 @@ static void processAddDevice(struct udev_device *dev)
             strtoul(bAlternateSetting, NULL, 16) << 16 |
             strtoul(bInterfaceNumber, NULL, 16) << 24;
     }
-    else if ((strcasestr(subsystem, SUBSYSTEM_QCOM_PORTS)       || 
+    else if ((strcasestr(subsystem, SUBSYSTEM_QCOM_PORTS)       ||
              strcasestr(subsystem, OLDER_SUBSYSTEM_GOBIPORTS)) &&
              (!qcdevCtx.mSetting->DeviceClass ||
-              (qcdevCtx.mSetting->DeviceClass & DEV_CLASS_PORTS)))
+              (qcdevCtx.mSetting->DeviceClass & (DEV_CLASS_PORTS | DEV_CLASS_SAHARA))))
     {
         QCDEV_LOG_INFO("Arrival: %s : %s\n",subsystem, devNode);
         /* Process the USB device and obtain the RMNET Info*/
         if (QCDEV_FALSE == extractDevInfo(dev, pdeviceCtx))
         {
             QCDEV_LOG_ERR("DEV_CLASS_PORTS extractDevInfo Failed\n");
-            if (pdeviceCtx->mDevParams.DevDetails) 
-            {
-                delete pdeviceCtx->mDevParams.DevDetails;
-                pdeviceCtx->mDevParams.DevDetails = NULL;
-            }
-            free(pdeviceCtx);
+            delete pdeviceCtx;
             return;
         }
-        pdeviceCtx->mDevParams.Flag =
-            ((ULONG)QC_DEV_TYPE_PORTS << 8) | (QC_DEV_STATE_ARRIVAL << 4) | ((ULONG)QC_DEV_BUS_TYPE_USB << 16) | isQcDriver;
 
         bInterfaceProtocol = udev_device_get_sysattr_value(devP, "bInterfaceProtocol");
         bInterfaceClass = udev_device_get_sysattr_value(devP, "bInterfaceClass");
@@ -874,12 +1220,7 @@ static void processAddDevice(struct udev_device *dev)
 			bAlternateSetting= [%s], bInterfaceNumber= [%s]\n",
 			bInterfaceProtocol, bInterfaceClass, bAlternateSetting,
 			bInterfaceNumber);
-        if (pdeviceCtx->mDevParams.DevDetails) 
-        {
-            delete pdeviceCtx->mDevParams.DevDetails;
-            pdeviceCtx->mDevParams.DevDetails = NULL;
-        }
-	    free(pdeviceCtx);
+	    delete pdeviceCtx;
 	    return;
 	}
 
@@ -888,6 +1229,21 @@ static void processAddDevice(struct udev_device *dev)
             strtoul(bInterfaceClass, NULL, 16) << 8 |
             strtoul(bAlternateSetting, NULL, 16) << 16 |
             strtoul(bInterfaceNumber, NULL, 16) << 24;
+
+        if (!IsDeviceAllowed(pdeviceCtx->mDevParams.Protocol))
+        {
+            delete pdeviceCtx;
+            return;
+        }
+
+        {
+            ULONG ifaceProtocol = strtoul(bInterfaceProtocol, NULL, 16);
+            ULONG devType = (ProtocolToDeviceClass(ifaceProtocol) == DEV_CLASS_SAHARA)
+                                ? QC_DEV_TYPE_SAHARA : QC_DEV_TYPE_PORTS;
+            pdeviceCtx->mDevParams.Flag =
+                (devType << 8) | (QC_DEV_STATE_ARRIVAL << 4) |
+                ((ULONG)QC_DEV_BUS_TYPE_USB << 16) | isQcDriver;
+        }
     }
     else if ((strcasestr(subsystem, SUBSYSTEM_QCOM_USB)     || 
              strcasestr(subsystem, OLDER_SUBSYSTEM_GOBIUSB)) &&
@@ -899,12 +1255,7 @@ static void processAddDevice(struct udev_device *dev)
         if (QCDEV_FALSE == extractDevInfo(dev, pdeviceCtx))
         {
             QCDEV_LOG_ERR("qcom_usb extractDevInfo Failed\n");
-            if (pdeviceCtx->mDevParams.DevDetails) 
-            {
-                delete pdeviceCtx->mDevParams.DevDetails;
-                pdeviceCtx->mDevParams.DevDetails = NULL;
-            }
-            free(pdeviceCtx);
+            delete pdeviceCtx;
             return;
         }
         pdeviceCtx->mDevParams.Flag =
@@ -929,12 +1280,7 @@ static void processAddDevice(struct udev_device *dev)
 			bAlternateSetting= [%s], bInterfaceNumber= [%s]\n",
 			bInterfaceProtocol, bInterfaceClass, bAlternateSetting,
 			bInterfaceNumber);
-        if (pdeviceCtx->mDevParams.DevDetails) 
-        {
-            delete pdeviceCtx->mDevParams.DevDetails;
-            pdeviceCtx->mDevParams.DevDetails = NULL;
-        }
-	    free(pdeviceCtx);
+	    delete pdeviceCtx;
 	    return;
 	}
         pdeviceCtx->mDevParams.Protocol =
@@ -953,12 +1299,7 @@ static void processAddDevice(struct udev_device *dev)
         if (QCDEV_FALSE == extractDevInfo(dev, pdeviceCtx))
         {
             QCDEV_LOG_ERR("SUBSYTEM qcom extractDevInfo Failed \n");
-            if (pdeviceCtx->mDevParams.DevDetails) 
-            {
-                delete pdeviceCtx->mDevParams.DevDetails;
-                pdeviceCtx->mDevParams.DevDetails = NULL;
-            }
-            free(pdeviceCtx);
+            delete pdeviceCtx;
             return;
         }
         pdeviceCtx->mDevParams.Flag =
@@ -972,8 +1313,8 @@ static void processAddDevice(struct udev_device *dev)
             value += strlen(QCDEV_QMI_NAME);
             pdeviceCtx->mDevParams.IfNameBufLen = 0;
 
-            if (snprintf(pdeviceCtx->mDevParams.IfName, QCDEV_PORT_NAME_LEN - 1,
-                         "%s%d", value) > 0)
+            if (snprintf(pdeviceCtx->mDevParams.IfName, QCDEV_PORT_NAME_LEN,
+                         "usb%s", value) > 0)
             {
                 pdeviceCtx->mDevParams.IfNameBufLen =
                     strlen(pdeviceCtx->mDevParams.IfName);
@@ -998,12 +1339,7 @@ static void processAddDevice(struct udev_device *dev)
 			bAlternateSetting= [%s], bInterfaceNumber= [%s]\n",
 			bInterfaceProtocol, bInterfaceClass, bAlternateSetting,
 			bInterfaceNumber);
-        if (pdeviceCtx->mDevParams.DevDetails) 
-        {
-            delete pdeviceCtx->mDevParams.DevDetails;
-            pdeviceCtx->mDevParams.DevDetails = NULL;
-        }
-	    free(pdeviceCtx);
+	    delete pdeviceCtx;
 	    return;
 	}
 
@@ -1013,19 +1349,16 @@ static void processAddDevice(struct udev_device *dev)
             strtoul(bAlternateSetting, NULL, 16) << 16 |
             strtoul(bInterfaceNumber, NULL, 16) << 24;
     }
-    else if (strcasestr(subsystem, SUBSYSTEM_MHI) || strcasestr(subsystem, SUBSYSTEM_WWAN))
+    else if ((strcasestr(subsystem, SUBSYSTEM_MHI) || strcasestr(subsystem, SUBSYSTEM_WWAN)) &&
+             (!qcdevCtx.mSetting->DeviceClass ||
+              (qcdevCtx.mSetting->DeviceClass & DEV_CLASS_MDM)))
     {
         QCDEV_LOG_INFO("Arrival: %s : %s\n",subsystem, devNode);
         /* Process the MHI device and obtain the MHI Dev Info*/
 	if (!strcasecmp(devNode, "NULL") || (QCDEV_FALSE == extractDevInfo(dev, pdeviceCtx)))
         {
             QCDEV_LOG_ERR("MHI DEV extractDevInfo Failed\n");
-            if (pdeviceCtx->mDevParams.DevDetails) 
-            {
-                delete pdeviceCtx->mDevParams.DevDetails;
-                pdeviceCtx->mDevParams.DevDetails = NULL;
-            }
-            free(pdeviceCtx);
+            delete pdeviceCtx;
             return;
         }
         pdeviceCtx->mDevParams.Flag =
@@ -1034,7 +1367,7 @@ static void processAddDevice(struct udev_device *dev)
     }
     else if (qcdevCtx.mSetting &&
              (!qcdevCtx.mSetting->DeviceClass ||
-              (qcdevCtx.mSetting->DeviceClass & DEV_CLASS_NET)) &&
+              (qcdevCtx.mSetting->DeviceClass & (DEV_CLASS_NET | DEV_CLASS_SAHARA))) &&
              (!(qcdevCtx.mSetting->Settings & DEV_FEATURE_SCAN_USB_WITH_VID) || !(qcdevCtx.mSetting)->VID || NULL != strcasestr((qcdevCtx.mSetting)->VID, vendor)))
     {
         QCDEV_LOG_INFO("Arrival: %s : %s\n",subsystem, devNode);
@@ -1071,12 +1404,7 @@ static void processAddDevice(struct udev_device *dev)
 			    bInterfaceClass= [%s], bAlternateSetting= [%s],		    \
 			    bInterfaceNumber= [%s]\n", bInterfaceProtocol, bInterfaceSubClass,
 				bInterfaceClass, bAlternateSetting, bInterfaceNumber);
-                if (pdeviceCtx->mDevParams.DevDetails) 
-                {
-                    delete pdeviceCtx->mDevParams.DevDetails;
-                    pdeviceCtx->mDevParams.DevDetails = NULL;
-                }
-                free(pdeviceCtx);
+                delete pdeviceCtx;
                 return;
             }
 
@@ -1086,24 +1414,33 @@ static void processAddDevice(struct udev_device *dev)
             alterSetting = strtoul(bAlternateSetting, NULL, 16);
             ifaceNum = strtoul(bInterfaceNumber, NULL, 16);
 
-            //TODO:Only to support ADB, RNDIS
-            if (!((ifaceProtocol == QCDEV_INTERFACE_PROTOCOL_ADB &&
-                   ifaceClass == QCDEV_INTERFACE_CLASS_ADB &&
-                   ifaceSubClass == QCDEV_INTERFACE_SUBCLASS_ADB) ||
-                  (ifaceProtocol == QCDEV_INTERFACE_PROTOCOL_FASTBOOT &&
-                   ifaceClass == QCDEV_INTERFACE_CLASS_FASTBOOT &&
-                   ifaceSubClass == QCDEV_INTERFACE_SUBCLASS_FASTBOOT) ||
-                  (ifaceProtocol == QCDEV_INTERFACE_PROTOCOL_RNDIS &&
-                   ifaceClass == QCDEV_INTERFACE_CLASS_RNDIS &&
-                   ifaceSubClass == QCDEV_INTERFACE_SUBCLASS_RNDIS)))
+            bool isSaharaFamily = (ProtocolToDeviceClass(ifaceProtocol) == DEV_CLASS_SAHARA);
+
+            if (isSaharaFamily)
             {
-                if (pdeviceCtx->mDevParams.DevDetails) 
-                {
-                    delete pdeviceCtx->mDevParams.DevDetails;
-                    pdeviceCtx->mDevParams.DevDetails = NULL;
-                }
-                free(pdeviceCtx);
+                /* no-devnode udev events. Drop this event. */
+                delete pdeviceCtx;
                 return;
+            }
+            else
+            {
+                /* ADB / RNDIS / Fastboot — identified by (protocol, class, subclass) triple.
+                 * Gated by DEV_CLASS_ADB subscription; caller sets it to receive these. */
+                bool isAdb = (ifaceProtocol == QCDEV_INTERFACE_PROTOCOL_ADB &&
+                              ifaceClass == QCDEV_INTERFACE_CLASS_ADB &&
+                              ifaceSubClass == QCDEV_INTERFACE_SUBCLASS_ADB);
+                bool isFastboot = (ifaceProtocol == QCDEV_INTERFACE_PROTOCOL_FASTBOOT &&
+                                   ifaceClass == QCDEV_INTERFACE_CLASS_FASTBOOT &&
+                                   ifaceSubClass == QCDEV_INTERFACE_SUBCLASS_FASTBOOT);
+                bool isRndis = (ifaceProtocol == QCDEV_INTERFACE_PROTOCOL_RNDIS &&
+                                ifaceClass == QCDEV_INTERFACE_CLASS_RNDIS &&
+                                ifaceSubClass == QCDEV_INTERFACE_SUBCLASS_RNDIS);
+
+                if (!(isAdb || isFastboot || isRndis))
+                {
+                    delete pdeviceCtx;
+                    return;
+                }
             }
 
             pdeviceCtx->mDevParams.Protocol =
@@ -1267,37 +1604,31 @@ static void processAddDevice(struct udev_device *dev)
 					}
 				}
 
-				if(pdeviceCtx->mDevParams.Protocol == 0x0 && pdeviceCtx->mDevParams.DevDesc !=NULL){
-					char* composite_name = (char*)malloc(QCDEV_MAX_VALUE_NAME);
-					if (strncpy(composite_name ,(PCHAR)pdeviceCtx->mDevParams.DevDesc, QCDEV_MAX_VALUE_NAME - 1) != NULL)
-					{
-						composite_name[QCDEV_MAX_VALUE_NAME - 1] = '\0';
-						snprintf(pdeviceCtx->mDevParams.DevDesc,QCDEV_MAX_VALUE_NAME,
-								  "Qualcomm USB Composite Device:%s",composite_name);
+				if(pdeviceCtx->mDevParams.Protocol == 0x0){
+					char composite_name[QCDEV_MAX_VALUE_NAME];
+					strncpy(composite_name, (PCHAR)pdeviceCtx->mDevParams.DevDesc, QCDEV_MAX_VALUE_NAME - 1);
+					composite_name[QCDEV_MAX_VALUE_NAME - 1] = '\0';
+					snprintf(pdeviceCtx->mDevParams.DevDesc, QCDEV_MAX_VALUE_NAME,
+								  "Qualcomm USB Composite Device:%s", composite_name);
+					if(pdeviceCtx->mDevParams.SerNum[0]){
+						size_t devDescLen = strlen(pdeviceCtx->mDevParams.DevDesc);
+						snprintf(pdeviceCtx->mDevParams.DevDesc + devDescLen,
+						QCDEV_MAX_VALUE_NAME - devDescLen,":%s",pdeviceCtx->mDevParams.SerNum);
 					}
-					if(pdeviceCtx->mDevParams.SerNum){
-						snprintf(strlen(pdeviceCtx->mDevParams.DevDesc)+pdeviceCtx->mDevParams.DevDesc,
-						QCDEV_MAX_VALUE_NAME,":%s",pdeviceCtx->mDevParams.SerNum);
+					if(pdeviceCtx->mDevParams.Loc[0]){
+						size_t devDescLen = strlen(pdeviceCtx->mDevParams.DevDesc);
+						const char *locSuffix = strncmp(pdeviceCtx->mDevParams.Loc, BUS_LOC, strlen(BUS_LOC)) == 0
+							? pdeviceCtx->mDevParams.Loc + strlen(BUS_LOC) : pdeviceCtx->mDevParams.Loc;
+						snprintf(pdeviceCtx->mDevParams.DevDesc + devDescLen,
+						QCDEV_MAX_VALUE_NAME - devDescLen,":%s",locSuffix);
 					}
-					if(pdeviceCtx->mDevParams.Loc){
-						snprintf(strlen(pdeviceCtx->mDevParams.DevDesc)+pdeviceCtx->mDevParams.DevDesc,
-						QCDEV_MAX_VALUE_NAME,":%s",pdeviceCtx->mDevParams.Loc+strlen(BUS_LOC));
-					}
-					if (strncpy(pdeviceCtx->mDevParams.ParentDev,pdeviceCtx->mDevParams.DevDesc, QCDEV_MAX_VALUE_NAME - 1) != NULL)
-					{
-						pdeviceCtx->mDevParams.ParentDev[QCDEV_MAX_VALUE_NAME - 1] = '\0';
-						pdeviceCtx->mDevParams.ParentLocationInfomation[QCDEV_MAX_VALUE_NAME - 1] = '\0';
-					}
-					free(composite_name);
+					pdeviceCtx->mDevParams.DevDescBufLen = strlen(pdeviceCtx->mDevParams.DevDesc);
+					snprintf(pdeviceCtx->mDevParams.ParentDev, QCDEV_MAX_VALUE_NAME, "%s", pdeviceCtx->mDevParams.DevDesc);
+					pdeviceCtx->mDevParams.ParentLocationInfomation[QCDEV_MAX_VALUE_NAME - 1] = '\0';
 				}
 			}
 			else{
-                if (pdeviceCtx->mDevParams.DevDetails) 
-                {
-                    delete pdeviceCtx->mDevParams.DevDetails;
-                    pdeviceCtx->mDevParams.DevDetails = NULL;
-                }
-				free(pdeviceCtx);
+				delete pdeviceCtx;
 				return ;
 			}
 
@@ -1326,12 +1657,7 @@ static void processAddDevice(struct udev_device *dev)
     {
         /* Unknown Device */
         QCDEV_LOG_ERR("Unknown Device \n");
-        if (pdeviceCtx->mDevParams.DevDetails) 
-        {
-            delete pdeviceCtx->mDevParams.DevDetails;
-            pdeviceCtx->mDevParams.DevDetails = NULL;
-        }
-        free(pdeviceCtx);
+        delete pdeviceCtx;
         return;
     }
     /*ignore the controllers*/
@@ -1339,12 +1665,7 @@ static void processAddDevice(struct udev_device *dev)
     {
         if (strcasestr(pdeviceCtx->mDevParams.DevDesc, "Controller"))
         {
-            if (pdeviceCtx->mDevParams.DevDetails) 
-            {
-                delete pdeviceCtx->mDevParams.DevDetails;
-                pdeviceCtx->mDevParams.DevDetails = NULL;
-            }
-	        free(pdeviceCtx);
+            delete pdeviceCtx;
             return;
         }
     }
@@ -1354,7 +1675,10 @@ static void processAddDevice(struct udev_device *dev)
     devPP = udev_device_get_parent(devP);
     const char *parentName;
     parentName = udev_device_get_sysattr_value(devPP, "product");
-    if (parentName != NULL && (!strcasestr(parentName, "Controller")) && snprintf(pdeviceCtx->mDevParams.ParentDev, QCDEV_MAX_VALUE_NAME, "Qualcomm USB Composite Device:%s", parentName) != NULL)
+    if (parentName != NULL && (!strcasestr(parentName, "Controller")) &&
+        strcasestr(parentName, "_SN:") &&
+        snprintf(pdeviceCtx->mDevParams.ParentDev, QCDEV_MAX_VALUE_NAME,
+                 "Qualcomm USB Composite Device:%s", parentName) > 0)
     {
         pdeviceCtx->mDevParams.ParentDev[QCDEV_MAX_VALUE_NAME - 1] = '\0';
         pdeviceCtx->mDevParams.ParentDevBufLen = strlen(pdeviceCtx->mDevParams.ParentDev);
@@ -1368,8 +1692,9 @@ static void processAddDevice(struct udev_device *dev)
         parentName = udev_device_get_sysattr_value(devP, "product");
         if (parentName != NULL &&
             (!strcasestr(parentName, "Controller")) &&
+            strcasestr(parentName, "_SN:") &&
             snprintf(pdeviceCtx->mDevParams.ParentDev, QCDEV_MAX_VALUE_NAME,
-                     "Qualcomm USB Composite Device:%s", parentName) != NULL)
+                     "Qualcomm USB Composite Device:%s", parentName) > 0)
         {
             pdeviceCtx->mDevParams.ParentDev[QCDEV_MAX_VALUE_NAME - 1] = '\0';
             pdeviceCtx->mDevParams.ParentDevBufLen = strlen(pdeviceCtx->mDevParams.ParentDev);
@@ -1447,11 +1772,11 @@ static void processAddDevice(struct udev_device *dev)
         pdeviceCtx->mCbParams.HwId = pdeviceCtx->mDevParams.HwId;
         pdeviceCtx->mCbParams.ParentDev = pdeviceCtx->mDevParams.ParentDev;
         pdeviceCtx->mCbParams.ParentLocationInfomation = pdeviceCtx->mDevParams.ParentLocationInfomation;
-        pdeviceCtx->mCbParams.DevDetails = new std::unordered_map<std::string, std::string>();
-        if (pdeviceCtx->mDevParams.DevDetails && pdeviceCtx->mCbParams.DevDetails) 
-        { 
-            QCDEV_LOCK_MUTEX_AND_UNLOCK_ON_RETURN(&qcdevCtx.mListLock);
-            *(pdeviceCtx->mCbParams.DevDetails) = *(pdeviceCtx->mDevParams.DevDetails); 
+
+        QCDEV_LOCK_MUTEX_AND_UNLOCK_ON_RETURN(&qcdevCtx.mListLock);
+        if (pdeviceCtx->mDevParams.DevDetails != nullptr)
+        {
+            pdeviceCtx->mCbParams.DevDetails = std::make_unique<DevDetailsMap>(*(pdeviceCtx->mDevParams.DevDetails));
         }
         refineDeviceHardwarePath(pdeviceCtx);
 
@@ -1464,19 +1789,6 @@ static void processAddDevice(struct udev_device *dev)
 
         /* Notifies with the user callback*/
         qcdevCtx.mCallback(&(pdeviceCtx->mCbParams), &pdeviceCtx->mpUserContext);
-
-        if (pdeviceCtx->mCbParams.DevDetails) 
-        { 
-            delete pdeviceCtx->mCbParams.DevDetails; 
-            pdeviceCtx->mCbParams.DevDetails = NULL; 
-        }
-    }
-
-    if (IsQcomLibusbEnable()) {
-        if(pdeviceCtx->mDevParams.Protocol == 0x0 && pdeviceCtx->mDevParams.DevDesc !=NULL){
-            QCDEV_LOCK_MUTEX_AND_UNLOCK_ON_RETURN(&qcdevCtx.mListLock);
-            register_libusb_hotplug_callback(pdeviceCtx);
-        }
     }
 }
 
@@ -1537,7 +1849,9 @@ static void processRemoveDevice(struct udev_device *dev)
         pdeviceCtx->mDevParams.Flag =
             QC_DEV_TYPE_PORTS << 8| QC_DEV_STATE_DEPARTURE << 4 | isQcDriver;
     }
-    else if (strcasestr(subsystem, SUBSYSTEM_MHI) || strcasestr(subsystem, SUBSYSTEM_WWAN))
+    else if ((strcasestr(subsystem, SUBSYSTEM_MHI) || strcasestr(subsystem, SUBSYSTEM_WWAN)) &&
+             (!qcdevCtx.mSetting->DeviceClass ||
+              (qcdevCtx.mSetting->DeviceClass & DEV_CLASS_MDM)))
     {
         QCDEV_LOG_INFO("Departure: %s : %s\n", subsystem, devNode);
         pdeviceCtx->mDevParams.Flag =
@@ -1558,24 +1872,16 @@ static void processRemoveDevice(struct udev_device *dev)
         }
 
         pdeviceCtx->mCbParams.Flag = pdeviceCtx->mDevParams.Flag;
-        pdeviceCtx->mCbParams.DevDetails = new std::unordered_map<std::string, std::string>();
-        if (pdeviceCtx->mDevParams.DevDetails) 
-        { 
-            *(pdeviceCtx->mCbParams.DevDetails) = *(pdeviceCtx->mDevParams.DevDetails); 
+        if (pdeviceCtx->mDevParams.DevDetails != nullptr)
+        {
+            pdeviceCtx->mCbParams.DevDetails = std::make_unique<DevDetailsMap>(*(pdeviceCtx->mDevParams.DevDetails));
         }
-        /* Notifies with the user callback*/
+        else
+        {
+            pdeviceCtx->mCbParams.DevDetails = nullptr;
+        }
+            /* Notifies with the user callback*/
         qcdevCtx.mCallback(&(pdeviceCtx->mCbParams), &pdeviceCtx->mpUserContext);
-        if (pdeviceCtx->mCbParams.DevDetails) 
-        { 
-            delete pdeviceCtx->mCbParams.DevDetails; 
-            pdeviceCtx->mCbParams.DevDetails = NULL; 
-        }
-    }
-
-    if (pdeviceCtx->mDevParams.DevDetails) 
-    { 
-        delete pdeviceCtx->mDevParams.DevDetails; 
-        pdeviceCtx->mDevParams.DevDetails = NULL; 
     }
     /* Remove the device from device context */
     popFromDeviceCtx(pdeviceCtx->mContextInt);
@@ -1620,10 +1926,6 @@ static void process_device(struct udev_device *dev)
     {
         /* Process the device when it is removed */
         processRemoveDevice(dev);
-        if (IsQcomLibusbEnable()) {
-            QCDEV_LOCK_MUTEX_AND_UNLOCK_ON_RETURN(&qcdevCtx.mListLock);
-            register_libusb_hotplug_callback(qcdevCtx.mpDeviceCtx);
-        }
     }
     return;
 }
@@ -1766,13 +2068,8 @@ static void clearDeviceCnxt(void)
     {
         traversal = qcdevCtx.mpDeviceCtx;
         qcdevCtx.mpDeviceCtx = qcdevCtx.mpDeviceCtx->mNext;
-        /* Free the DevDetails map allocated with new in processAddDevice */
-        if (traversal->mDevParams.DevDetails)
-        {
-            delete traversal->mDevParams.DevDetails;
-            traversal->mDevParams.DevDetails = NULL;
-        }
-        free(traversal);
+        /* Destructor of _DeviceCtx handles mDevParams.DevDetails cleanup */
+        delete traversal;
     }
     return;
 }
@@ -1797,13 +2094,12 @@ static void PushtoApplication(char *ipAddr, char* flag)
     PDeviceCtx pdeviceCtx;
     int isQcDriver = 1;
 
-    pdeviceCtx = (PDeviceCtx)malloc(sizeof(struct _DeviceCtx));
+    pdeviceCtx = new _DeviceCtx();
     if (NULL == pdeviceCtx)
     {
         QCDEV_LOG_ERR("Failed to allocate memorey\n");
         return;
     }
-    memset(pdeviceCtx, 0, sizeof(struct _DeviceCtx));
 
     snprintf(pdeviceCtx->mDevParams.DevDesc, QCDEV_MAX_VALUE_NAME, "ADB-IP: %s", ipAddr);
     snprintf(pdeviceCtx->mDevParams.DevName, QCDEV_MAX_VALUE_NAME, "ADB-IP: %s", ipAddr);
@@ -1827,12 +2123,14 @@ static void PushtoApplication(char *ipAddr, char* flag)
     pdeviceCtx->mCbParams.HwId = qcdevCtx.mpDeviceCtx->mDevParams.HwId;
     pdeviceCtx->mCbParams.ParentDev = qcdevCtx.mpDeviceCtx->mDevParams.ParentDev;
     pdeviceCtx->mCbParams.ParentLocationInfomation = qcdevCtx.mpDeviceCtx->mDevParams.ParentLocationInfomation;
-    pdeviceCtx->mCbParams.DevDetails = new std::unordered_map<std::string, std::string>();
-    if (pdeviceCtx->mDevParams.DevDetails) 
-    { 
-        *(pdeviceCtx->mCbParams.DevDetails) = *(pdeviceCtx->mDevParams.DevDetails); 
+    if (pdeviceCtx->mDevParams.DevDetails != nullptr)
+    {
+        pdeviceCtx->mCbParams.DevDetails = std::make_unique<DevDetailsMap>(*(pdeviceCtx->mDevParams.DevDetails));
     }
-        
+    else
+    {
+        pdeviceCtx->mCbParams.DevDetails = nullptr;
+    }
 
     refineDeviceHardwarePath(pdeviceCtx);
 
@@ -1844,11 +2142,8 @@ static void PushtoApplication(char *ipAddr, char* flag)
     }
     /* Notifies with the user callback*/
     qcdevCtx.mCallback(&(pdeviceCtx->mCbParams), &pdeviceCtx->mpUserContext);
-    if (pdeviceCtx->mCbParams.DevDetails) 
-    { 
-        delete pdeviceCtx->mCbParams.DevDetails; 
-        pdeviceCtx->mCbParams.DevDetails = NULL; 
-    }
+
+    delete pdeviceCtx;
     QCDEV_LOG_DBG("Out\n");
 }
 
@@ -1858,13 +2153,19 @@ void PushLibUSBToApplication(PQcomDeviceInfo devinfo)
     PDeviceCtx pdeviceCtx;
     int isQcDriver = 1;
 
-    pdeviceCtx = (PDeviceCtx)malloc(sizeof(struct _DeviceCtx));
+    if (!IsDeviceAllowed(devinfo->protocol))
+    {
+        QCDEV_LOG_INFO("PushLibUSBToApplication: filtered protocol 0x%lX by DeviceClass/DeviceProtocol\n",
+                       devinfo->protocol);
+        return;
+    }
+
+    pdeviceCtx = new _DeviceCtx();
     if (NULL == pdeviceCtx)
     {
         QCDEV_LOG_ERR("Failed to allocate memorey\n");
         return;
     }
-    memset(pdeviceCtx, 0, sizeof(struct _DeviceCtx));
 
     pdeviceCtx->mCbParams.DevDesc = devinfo->DevDesc;
     pdeviceCtx->mCbParams.DevName = devinfo->DevName;
@@ -1878,10 +2179,13 @@ void PushLibUSBToApplication(PQcomDeviceInfo devinfo)
     pdeviceCtx->mCbParams.HwId = devinfo->HwId;
     pdeviceCtx->mCbParams.ParentDev = devinfo->ParentDev;
     pdeviceCtx->mCbParams.ParentLocationInfomation = devinfo->ParentLocationInformation;
-    pdeviceCtx->mCbParams.DevDetails = new std::unordered_map<std::string, std::string>();
-    if (devinfo->DevDetailsMP) 
-    { 
-        *(pdeviceCtx->mCbParams.DevDetails) = *(devinfo->DevDetailsMP); 
+    if (devinfo->DevDetailsMP != nullptr)
+    {
+        pdeviceCtx->mCbParams.DevDetails = std::make_unique<DevDetailsMap>(*(devinfo->DevDetailsMP));
+    }
+    else
+    {
+        pdeviceCtx->mCbParams.DevDetails = nullptr;
     }
 
     if (qcdevCtx.mCallbackCtx != NULL)
@@ -1890,11 +2194,8 @@ void PushLibUSBToApplication(PQcomDeviceInfo devinfo)
     }
     /* Notifies with the user callback*/
     qcdevCtx.mCallback(&(pdeviceCtx->mCbParams), &pdeviceCtx->mpUserContext);
-    if (pdeviceCtx->mCbParams.DevDetails) 
-    { 
-        delete pdeviceCtx->mCbParams.DevDetails; 
-        pdeviceCtx->mCbParams.DevDetails = NULL; 
-    }
+
+    delete pdeviceCtx;
     return;
 }
 
@@ -1950,8 +2251,31 @@ static void *monitor_devices(void *userData)
     //TODO: For the time calculation
     clock_t t;
     t = clock();
+    /* Load EUD library and start the USB monitor before the initial scan */
+    QcEud_LoadLib();
+    QcEud_StartMonitor(EudDeviceChangeCb);
+
     /* To list all the available devices and update the device ctx*/
     enumerate_devices(udev);
+    /* Promote any EUD devices that arrived before their USB parent */
+    ProcessPendingEudArrivals();
+
+    if (IsQcomLibusbEnable()) {
+        register_libusb_hotplug_callback(&qcdevCtx);
+        QCDEV_LOG_INFO("libusb hotplug callback registered\n");
+        start_arrival_worker();
+        QCDEV_LOG_INFO("arrival worker started\n");
+        g_libusb_event_running = true;
+        int rc = pthread_create(&g_libusb_event_thread, NULL, libusb_event_thread_fn, get_libusb_context());
+        if (rc != 0) {
+            QCDEV_LOG_ERR("Failed to create libusb event thread: %d\n", rc);
+            g_libusb_event_running = false;
+            stop_arrival_worker();
+            unregister_libusb_hotplug_callback();
+        } else {
+            QCDEV_LOG_INFO("libusb event thread started\n");
+        }
+    }
     t = clock() - t;
     double time_taken = ((double)t) / CLOCKS_PER_SEC;
     QCDEV_LOG_DBG("Took %f, seconds to discover \n", time_taken);
@@ -2236,6 +2560,8 @@ static void *monitor_devices(void *userData)
              * zero, the resources of the device will be released.
              */
             udev_device_unref(dev);
+            /* Promote any EUD devices that were waiting for their USB parent */
+            ProcessPendingEudArrivals();
         }
     }
 
@@ -2306,6 +2632,9 @@ VOID QcDevice::SetDeviceChangeCallback(DEVICECHANGE_CALLBACK Cb, PVOID AppContex
     qcdevCtx.mCallback = Cb;
     qcdevCtx.mCallbackCtx = AppContext;
 
+#ifdef ALPACA
+    AlpacaDiscoveryCallback(Cb, AppContext);
+#endif
     return;
 }
 
@@ -2324,12 +2653,13 @@ VOID QcDevice::SetFeature(PVOID Features)
     /* Lock a mutex and unlock it on return. */
     QCDEV_LOCK_MUTEX_AND_UNLOCK_ON_RETURN(&qcdevCtx.mListLock);
     /* Store the Feature settings */
-    qcdevCtx.mSetting = (PDEV_FEATURE_SETTING)malloc(sizeof(DEV_FEATURE_SETTING));
+    qcdevCtx.mSetting = new DEV_FEATURE_SETTING();
     PDEV_FEATURE_SETTING FeaturesRef = (PDEV_FEATURE_SETTING)Features;
-    qcdevCtx.mSetting->DeviceClass = FeaturesRef->DeviceClass;
-    qcdevCtx.mSetting->Settings = FeaturesRef->Settings;
-    qcdevCtx.mSetting->VID = FeaturesRef->VID;
-    qcdevCtx.mSetting->Version = FeaturesRef->Version;
+    qcdevCtx.mSetting->DeviceClass    = FeaturesRef->DeviceClass;
+    qcdevCtx.mSetting->Settings       = FeaturesRef->Settings;
+    qcdevCtx.mSetting->VID            = FeaturesRef->VID;
+    qcdevCtx.mSetting->Version        = FeaturesRef->Version;
+    qcdevCtx.mSetting->DeviceProtocol = FeaturesRef->DeviceProtocol;
     //qcdevCtx.mSetting = (PDEV_FEATURE_SETTING) Features;
     return;
 }
@@ -2365,10 +2695,13 @@ VOID QcDevice::StartDeviceMonitor(VOID)
     }
     /* Store in global Cntxt */
     qcdevCtx.mUdev = udev;
-    if (!load_libusb()) {
+
+    if (IsEudLibPresent()) {
+        QCDEV_LOG_INFO("EUD library detected at '%s' - skipping our libusb load/init/exist\n",
+                       GetEudLibPath());
+    } else if (!load_libusb()) {
         QCDEV_LOG_INFO("Failed to load libusb library. Hence, libusb won't be initialized.\n");
-    } 
-    else {
+    } else {
         initialize_libusb();
     }
 
@@ -2421,16 +2754,43 @@ QCDEVLIB_API VOID QcDevice::StopDeviceMonitor(VOID)
     pthread_cancel(qcdevCtx.mThId);
     pthread_join(qcdevCtx.mThId, NULL);
 
+    /* Stop EUD monitor and clean up */
+    QcEud_StopMonitor();
+    QcEud_Cleanup();
+
+    /* Clear any remaining pending EUD items */
+    pthread_mutex_lock(&g_eudPendingLock);
+    while (g_eudPendingHead)
+    {
+        EudPendingItem *tmp = g_eudPendingHead;
+        g_eudPendingHead = g_eudPendingHead->next;
+        delete tmp;
+    }
+    pthread_mutex_unlock(&g_eudPendingLock);
+
+    if (IsQcomLibusbEnable()) {
+        if (g_libusb_event_running) {
+            g_libusb_event_running = false;
+            pthread_join(g_libusb_event_thread, NULL);
+            QCDEV_LOG_INFO("libusb event thread stopped\n");
+            stop_arrival_worker();
+            QCDEV_LOG_INFO("arrival worker stopped\n");
+            unregister_libusb_hotplug_callback();
+        }
+    }
+
     /* To clear stored values */
     clearDeviceCnxt();
+
     if (is_libusb_loaded()) {
         deinitialize_libusb();
     }
+
     qcdevCtx.mpDeviceCtx = NULL;
     qcdevCtx.mCallback = NULL;
     if (qcdevCtx.mSetting)
     {
-        free(qcdevCtx.mSetting);
+        delete qcdevCtx.mSetting;
     }
     qcdevCtx.mSetting = NULL;
     if (qcdevCtx.mon)
@@ -2610,9 +2970,52 @@ QCDEVLIB_API void QcDevice::logFileCreation(){
 }
 }
 #endif
+QCDEVLIB_API BOOL QcDevice::initializeEudTrace(VOID)
+{
+    QCDEV_LOCK_MUTEX_AND_UNLOCK_ON_RETURN(&qcdevCtx.mListLock);
+
+    if (!QcEud_Initialize())
+    {
+        QCDEV_LOG_ERR("initializeEudTrace: QcEud_Initialize failed\n");
+        return FALSE;
+    }
+    return TRUE;
+}
+
+QCDEVLIB_API BOOL QcDevice::startAmbientMode(VOID)
+{
+    EUD_ERR_t err = QcEud_SpoofUsbDetach();
+    if (err == EUD_SUCCESS)
+    {
+        QCDEV_LOG_INFO("startAmbientMode: SpoofUsbDetach succeeded\n");
+    }
+    else
+    {
+        QCDEV_LOG_ERR("startAmbientMode: SpoofUsbDetach failed (err=%d)\n", err);
+    }
+    return (err == EUD_SUCCESS) ? TRUE : FALSE;
+}
+
+QCDEVLIB_API BOOL QcDevice::stopAmbientMode(VOID)
+{
+    EUD_ERR_t err = QcEud_SpoofUsbAttach();
+    if (err == EUD_SUCCESS)
+    {
+        QCDEV_LOG_INFO("stopAmbientMode: SpoofUsbAttach succeeded\n");
+    }
+    else
+    {
+        QCDEV_LOG_ERR("stopAmbientMode: SpoofUsbAttach failed (err=%d)\n", err);
+    }
+    return (err == EUD_SUCCESS) ? TRUE : FALSE;
+}
+
 QCDEVLIB_API VOID QcDevice::SetLoggingCallback(QCD_LOGGING_CALLBACK Cb)
 {
     setLoggerCallback(Cb);
+#ifdef ALPACA
+    setAlpacaLoggingCallback((AlpacaQuts::QCD_LOGGING_CALLBACK)Cb);
+#endif
 }
 
 /**
@@ -2744,6 +3147,26 @@ HANDLE QcDevice::OpenDevice(PVOID DeviceName)
         return INVALID_HANDLE_VALUE;
     }
 
+    /* EUD device handling: if the name contains "EUD", route to QcEud APIs */
+    if (strcasestr((PCHAR)DeviceName, "EUD"))
+    {
+        HANDLE hEud = (HANDLE)(intptr_t)INVALID_HANDLE_VALUE;
+        if (strcasestr((PCHAR)DeviceName, "Control"))
+        {
+            hEud = QcEud_OpenDevice(DeviceName, QC_EUD_CTL_HANDLE);
+        }
+        else if (strcasestr((PCHAR)DeviceName, "Trace"))
+        {
+            hEud = QcEud_OpenDevice(DeviceName, QC_EUD_TRC_HANDLE);
+        }
+        else
+        {
+            QCDEV_LOG_ERR("OpenDevice: EUD device %s is neither Control nor Trace\n", (PCHAR)DeviceName);
+            hEud = (HANDLE)(intptr_t)INVALID_HANDLE_VALUE;
+        }
+        return hEud;
+    }
+
     if (IsQcomLibusbEnable())
     {
         int retStatus = QcomLibusbDevice::qcom_libusb_open((PCHAR)DeviceName, (PCHAR)NULL, (void**)&appHdl);
@@ -2792,6 +3215,14 @@ VOID QcDevice::CloseDevice(HANDLE hDevice)
     QCDEV_LOG_INFO("In \n");
     LONG appHdl = INVALID_HANDLE_VALUE;
 
+    /* EUD device: close via QcEud APIs */
+    if (QcEud_FindHandle(hDevice))
+    {
+        QcEud_CloseDevice();
+        QcEud_UnregisterHandle(hDevice);
+        return;
+    }
+
     if (IsQcomLibusbEnable())
     {
         QcomLibusbDevice::qcom_libusb_close((void**)&hDevice);
@@ -2839,6 +3270,14 @@ VOID QcDevice::CloseDevice(HANDLE hDevice)
 BOOL QcDevice::ReadFromDevice(HANDLE hDevice, PVOID RxBuffer,
                               DWORD NumBytesToRead, LPDWORD NumBytesReturned)
 {
+    /* EUD trace read */
+    if (QcEud_FindHandle(hDevice))
+    {
+        BOOL bErr = QcEud_ReadTrace(RxBuffer, NumBytesToRead, NumBytesReturned);
+        QCDEV_LOG_DBG("EUD Trace ReadFromDevice: err=%d NumBytesReturned: %d\n",
+                       bErr, *NumBytesReturned);
+        return bErr;
+    }
 
     if (IsQcomLibusbEnable())
     {
@@ -2850,11 +3289,12 @@ BOOL QcDevice::ReadFromDevice(HANDLE hDevice, PVOID RxBuffer,
             QCDEV_LOG_DBG("Handle: 0x%x, readFrom %d bytes, ActualNumBytesReturned: %d\n", hDevice, NumBytesToRead, bytesTransferred);
             return QCDEV_TRUE;
         }
-		else if (retStatus == LIBUSB_ERROR_TIMEOUT)
+        else if (retStatus == LIBUSB_ERROR_TIMEOUT)
         {
-			*NumBytesReturned = 0;
-			QCDEV_LOG_DBG("Timeout!! Handle: 0x%x, readFrom %d bytes, ActualNumBytesReturned: %d\n", hDevice, NumBytesToRead, bytesTransferred);
-            return TRUE;
+            *NumBytesReturned = 0;
+            QCDEV_LOG_DBG("LIBUSB_ERROR_TIMEOUT: Handle: 0x%lx, readFrom %d bytes, ActualNumBytesReturned: %d\n",
+                      (long)hDevice, NumBytesToRead, bytesTransferred);
+            return QCDEV_TRUE;
         }
         else
         {

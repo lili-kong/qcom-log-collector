@@ -3,6 +3,7 @@
 // #include "stdafx.h"
 #include "../common/qdver.h"
 #include "scandev.h"
+#include "..\EUD\QdsEud.h"
 #include <devpropdef.h>
 #include <queue>
 
@@ -15,10 +16,149 @@ static const DEVPROPKEY QDS_DEVPKEY_BusReportedDeviceDesc =
 #include <set>
 #include "../common/Utils.h"
 
+#ifdef ALPACA_SUPPORT
+#include "AlpacaDeviceDiscovery\AlpacaDeviceDiscovery.h"
+#endif
 
 using namespace QcDevice;
 using namespace Utils;
 std::atomic<BOOL> _IsQcomLibusbEnable = FALSE;
+
+void CopyCbParams(CB_PARAMS& dest, const CB_PARAMS& src)
+{
+    dest.DevDesc = src.DevDesc;
+    dest.DevName = src.DevName;
+    dest.IfName = src.IfName;
+    dest.Loc = src.Loc;
+    dest.DevPath = src.DevPath;
+    dest.SerNum = src.SerNum;
+    dest.SocVer = src.SocVer;
+    dest.SerNumMsm = src.SerNumMsm;
+
+    dest.Mtu = src.Mtu;
+    dest.Flag = src.Flag;
+    dest.Protocol = src.Protocol;
+
+    dest.HwId = src.HwId;
+    dest.ParentDev = src.ParentDev;
+    dest.ParentLocationInfomation = src.ParentLocationInfomation;
+
+    // Deep copy for unique_ptr
+    if (src.DevDetails)
+    {
+        dest.DevDetails = std::make_unique<DevDetailsMap>(*src.DevDetails);
+    }
+    else
+    {
+        dest.DevDetails.reset();
+    }
+}
+
+// QC_DEV_ITEM Constructor Destructor definition
+_QC_DEV_ITEM::_QC_DEV_ITEM() {
+    Info.Type = QC_DEV_TYPE_NONE;
+    Info.Flag = DEV_FLAG_NONE;
+    Info.IsQCDriver = 0;
+    Info.Reserved = 0;
+    Context = nullptr;
+    UserContext = nullptr;
+    InterfaceNumber = 0xFF;
+    ZeroMemory(DevDesc, QC_MAX_VALUE_NAME);
+    ZeroMemory(DevDescA, QC_MAX_VALUE_NAME);
+    ZeroMemory(DevNameW, QC_MAX_VALUE_NAME);
+    ZeroMemory(DevNameA, QC_MAX_VALUE_NAME);
+    ZeroMemory(HwId, QC_MAX_VALUE_NAME);
+    ZeroMemory(ParentDev, QC_MAX_VALUE_NAME);
+    ZeroMemory(ParentLocationInfomation, QC_MAX_VALUE_NAME);
+    ZeroMemory(Location, QC_MAX_VALUE_NAME);
+    ZeroMemory(DevPath, QC_MAX_VALUE_NAME);
+    ZeroMemory(InterfaceName, QC_MAX_VALUE_NAME);
+    ZeroMemory(SerNum, 256);
+    ZeroMemory(SocVer, 256);
+    ZeroMemory(SerNumMsm, 256);
+    ZeroMemory(PortNos, 256);
+    InitializeListHead(&List);
+    DevDetails = nullptr;
+};
+
+_QC_DEV_ITEM::_QC_DEV_ITEM(const QC_DEV_ITEM& other) {
+
+    InitializeListHead(&List);
+    // Copy simple struct
+    Info = other.Info;
+    // Copy pointers (non-owning, just values)
+    Context = other.Context;
+    UserContext = other.UserContext;
+    InterfaceNumber = other.InterfaceNumber;
+    BusType = other.BusType;
+    memcpy(DevDesc, other.DevDesc, sizeof(DevDesc));
+    memcpy(DevDescA, other.DevDescA, sizeof(DevDescA));
+    memcpy(DevNameW, other.DevNameW, sizeof(DevNameW));
+    memcpy(DevNameA, other.DevNameA, sizeof(DevNameA));
+    memcpy(HwId, other.HwId, sizeof(HwId));
+    memcpy(ParentDev, other.ParentDev, sizeof(ParentDev));
+    memcpy(ParentLocationInfomation, other.ParentLocationInfomation, sizeof(ParentLocationInfomation));
+    memcpy(Location, other.Location, sizeof(Location));
+    memcpy(DevPath, other.DevPath, sizeof(DevPath));
+    memcpy(InterfaceName, other.InterfaceName, sizeof(InterfaceName));
+    memcpy(SerNum, other.SerNum, sizeof(SerNum));
+    memcpy(SocVer, other.SocVer, sizeof(SocVer));
+    memcpy(SerNumMsm, other.SerNumMsm, sizeof(SerNumMsm));
+    memcpy(PortNos, other.PortNos, sizeof(PortNos));
+    // memcpy(&CbParams, &other.CbParams, sizeof(CB_PARAMS));
+    CopyCbParams(CbParams, other.CbParams);
+
+    if (other.DevDetails != nullptr)
+    {
+        DevDetails = std::make_unique<DevDetailsMap>(*other.DevDetails);
+    }
+    else
+    {
+        DevDetails = nullptr;
+    }
+
+};
+
+void _QC_DEV_ITEM::reset()
+{
+    // Reset list (important for linked list usage)
+    InitializeListHead(&List);
+
+    Info.Type = 0;
+    Info.Flag = 0;
+    Info.IsQCDriver = 0;
+    Info.Reserved = 0;
+
+    Context = nullptr;
+    UserContext = nullptr;
+
+
+    CbParams.DevDetails.reset();  // ensure unique_ptr is released
+    CbParams = CB_PARAMS{};
+
+    memset(DevDesc, 0, sizeof(DevDesc));
+    memset(DevDescA, 0, sizeof(DevDescA));
+    memset(DevNameW, 0, sizeof(DevNameW));
+    memset(DevNameA, 0, sizeof(DevNameA));
+    memset(HwId, 0, sizeof(HwId));
+    memset(ParentDev, 0, sizeof(ParentDev));
+    memset(ParentLocationInfomation, 0, sizeof(ParentLocationInfomation));
+    memset(Location, 0, sizeof(Location));
+    memset(DevPath, 0, sizeof(DevPath));
+    memset(InterfaceName, 0, sizeof(InterfaceName));
+    memset(SerNum, 0, sizeof(SerNum));
+    memset(SocVer, 0, sizeof(SocVer));
+    memset(SerNumMsm, 0, sizeof(SerNumMsm));
+    memset(PortNos, 0, sizeof(PortNos));
+    InterfaceNumber = 0;
+    BusType = 0;
+    DevDetails.reset();
+
+}
+_QC_NOTIFICATION_STORE::_QC_NOTIFICATION_STORE() {
+    InitializeListHead(&List);
+    InitializeListHead(&DevItemChain);
+};
 
 namespace QcDevice
 {
@@ -43,6 +183,331 @@ namespace QcDevice
       PQC_NOTIFICATION_STORE NotifyStore;
       std::atomic<BOOL> IsQcomLibusbEnable = FALSE;
 
+      // EUD device event queue – populated by EudDeviceChangeCb (EUD monitor
+      // thread) and drained by ProcessEudDeviceQueue (RunDevMonitor thread).
+      std::queue<EUD_DEVICE_INFO> eudDeviceQueue_;
+      CRITICAL_SECTION            eudQueueLock_;
+
+      // -----------------------------------------------------------------------
+      // EudDeviceChangeCb
+      //   Invoked by the EUD monitor thread whenever an EUD peripheral arrives
+      //   or departs.  Enqueues the event and wakes RunDevMonitor immediately
+      //   by signalling hRegChangeEvt[QC_REG_DEVMAP].
+      // -----------------------------------------------------------------------
+      static void EudDeviceChangeCb(const EUD_DEVICE_INFO* info)
+      {
+         if (info == nullptr) return;
+
+         if (strnlen(info->device_name, EUD_MAX_DEVICE_NAME) >= EUD_MAX_DEVICE_NAME)
+         {
+            QCD_Printf(Error, "EudDeviceChangeCb: device_name not null-terminated or exceeds max length\n");
+            return;
+         }
+
+         EnterCriticalSection(&eudQueueLock_);
+         eudDeviceQueue_.push(*info);
+         LeaveCriticalSection(&eudQueueLock_);
+
+         if (hRegChangeEvt[QC_REG_DEVMAP] != NULL)
+            SetEvent(hRegChangeEvt[QC_REG_DEVMAP]);
+      }
+
+      // -----------------------------------------------------------------------
+      // ProcessEudDeviceQueue
+      //   Called from RunDevMonitor.  Drains eudDeviceQueue_ and for each item:
+      //     Arrival  (flag==1): allocates a QC_DEV_ITEM, adds it to ArrivalList,
+      //                         fires fNotifyCb.
+      //     Departure(flag==0): finds the matching item in ArrivalList, removes
+      //                         it, fires fNotifyCb.
+      // -----------------------------------------------------------------------
+      VOID ProcessEudDeviceQueue(VOID)
+      {
+         while (true)
+         {
+            EUD_DEVICE_INFO info;
+            bool hasItem = false;
+
+            EnterCriticalSection(&eudQueueLock_);
+            if (!eudDeviceQueue_.empty())
+            {
+               info    = eudDeviceQueue_.front();
+               eudDeviceQueue_.pop();
+               hasItem = true;
+            }
+            LeaveCriticalSection(&eudQueueLock_);
+
+            if (!hasItem) break;
+
+            if (info.flag == 1)
+            {
+               // ---- ARRIVAL ----
+               PQC_DEV_ITEM pItem = NULL;
+
+               EnterCriticalSection(&opLock);
+               if (!IsListEmpty(&FreeList))
+               {
+                  PLIST_ENTRY pEntry = RemoveHeadList(&FreeList);
+                  pItem = CONTAINING_RECORD(pEntry, QC_DEV_ITEM, List);
+               }
+               LeaveCriticalSection(&opLock);
+
+               if (pItem == NULL)
+               {
+                  QCD_Printf(Fatal, "ProcessEudDeviceQueue: no free item for EUD arrival\n");
+                  continue;
+               }
+
+               // Validate pItem is properly initialized before use
+               if (pItem->DevDetails == NULL) {
+                   QCD_Printf(Fatal, "ProcessEudDeviceQueue: DevDetails not initialized\n");
+                   EnterCriticalSection(&opLock);
+                   InsertHeadList(&FreeList, &pItem->List);
+                   LeaveCriticalSection(&opLock);
+                   continue;
+               }
+
+               pItem->Info.Type       = QC_DEV_TYPE_EUD;
+               pItem->Info.Flag       = DEV_FLAG_NONE;  // pending until parent USB device appears
+               pItem->Info.IsQCDriver = 1;
+               pItem->BusType         = QC_DEV_BUS_TYPE_USB;
+               pItem->UserContext     = NULL;
+               if (pItem->DevDetails) pItem->DevDetails->clear();
+
+               // device_name (narrow) → DevDesc (wide) + DevDescA (narrow)
+               MultiByteToWideChar(CP_ACP, 0, info.device_name, -1,
+                                   (LPWSTR)pItem->DevDesc, QC_MAX_VALUE_NAME / 2);
+               size_t rtnBytes = 0;
+               wcstombs_s(&rtnBytes, pItem->DevDescA, QC_MAX_VALUE_NAME,
+                          (PWCHAR)pItem->DevDesc, _TRUNCATE);
+
+               // DevNameW = "\\.\<device_name>"
+               StringCchCopy((PTSTR)pItem->DevNameW, QC_MAX_VALUE_NAME / 2, TEXT(QC_DEV_PREFIX));
+               StringCchCat ((PTSTR)pItem->DevNameW, QC_MAX_VALUE_NAME / 2, (PTSTR)pItem->DevDesc);
+               wcstombs_s(&rtnBytes, pItem->DevNameA, QC_MAX_VALUE_NAME,
+                          (PWCHAR)pItem->DevNameW, _TRUNCATE);
+
+               // Derive SerNumMsm
+               {
+                  char corrSerNumMsmA[9];
+                  ConvertDeviceIdToSerNumMsm(info.device_id, corrSerNumMsmA, sizeof(corrSerNumMsmA));
+                  MultiByteToWideChar(CP_ACP, 0, corrSerNumMsmA, -1, (LPWSTR)pItem->SerNumMsm, 128);
+               }
+
+               // Add to ArrivalList, then check if the parent USB composite device
+               // is already present (matched by SerNumMsm).  If it is, promote to
+               // DEV_FLAG_ARRIVAL and fire the callback immediately.  Otherwise leave
+               // as DEV_FLAG_NONE (pending) — ProcessPendingEudArrivals() will fire
+               // the callback once the parent USB device appears.
+               EnterCriticalSection(&opLock);
+               InsertTailList(&ArrivalList, &pItem->List);
+               {
+                  BOOL parentPresent = FALSE;
+                  PLIST_ENTRY scanHead = &ArrivalList;
+                  PLIST_ENTRY scanPos  = scanHead->Flink;
+                  while (scanPos != scanHead)
+                  {
+                     PQC_DEV_ITEM pCand = CONTAINING_RECORD(scanPos, QC_DEV_ITEM, List);
+                     scanPos = scanPos->Flink;
+                     if (pCand->Info.Type != QC_DEV_TYPE_EUD &&
+                         (pItem->SerNumMsm[0] != 0 || pItem->SerNumMsm[1] != 0) &&
+                         StrCmpW((PCWSTR)pItem->SerNumMsm, (PCWSTR)pCand->SerNumMsm) == 0)
+                     {
+                        parentPresent = TRUE;
+                        break;
+                     }
+                  }
+                  if (parentPresent)
+                     pItem->Info.Flag = DEV_FLAG_ARRIVAL;
+               }
+               LeaveCriticalSection(&opLock);
+
+               if (pItem->Info.Flag == DEV_FLAG_ARRIVAL && fNotifyCb != NULL)
+               {
+                  pItem->CbParams.DevDesc   = (PWCHAR)pItem->DevDesc;
+                  pItem->CbParams.DevName   = (PWCHAR)pItem->DevNameW;
+                  pItem->CbParams.IfName    = NULL;
+                  pItem->CbParams.Loc       = NULL;
+                  pItem->CbParams.DevPath   = NULL;
+                  pItem->CbParams.SerNum    = NULL;
+                  pItem->CbParams.SocVer    = NULL;
+                  pItem->CbParams.SerNumMsm = (PWCHAR)pItem->SerNumMsm;
+                  pItem->CbParams.HwId      = NULL;
+                  pItem->CbParams.ParentDev = NULL;
+                  pItem->CbParams.ParentLocationInfomation = NULL;
+                  pItem->CbParams.Mtu       = 0;
+                  pItem->CbParams.Protocol  = 0;
+                  pItem->CbParams.Flag = ((ULONG)QC_DEV_TYPE_EUD << 8) |
+                                         ((ULONG)QC_DEV_STATE_ARRIVAL << 4) | (ULONG)1;
+                  pItem->CbParams.DevDetails = std::make_unique<DevDetailsMap>();
+                  PVOID userCtx = CallerContext;
+                  QCD_Printf(Info, "=> ARRIVAL: <%ws> SerNumMsm <%ws>\n",
+                             (PWCHAR)pItem->DevDesc, (PWCHAR)pItem->SerNumMsm);
+                  fNotifyCb(&pItem->CbParams, &userCtx);
+               }
+               else if (pItem->Info.Flag == DEV_FLAG_NONE)
+               {
+                  QCD_Printf(Info, "=> ARRIVAL deferred <%ws> SerNumMsm <%ws> (waiting for USB parent)\n",
+                             (PWCHAR)pItem->DevDesc, (PWCHAR)pItem->SerNumMsm);
+               }
+            }
+            else
+            {
+               // ---- DEPARTURE ----
+               WCHAR wDevDesc[QC_MAX_VALUE_NAME] = { 0 };
+               MultiByteToWideChar(CP_ACP, 0, info.device_name, -1,
+                                   wDevDesc, QC_MAX_VALUE_NAME / 2);
+
+               PQC_DEV_ITEM pFound = NULL;
+
+               EnterCriticalSection(&opLock);
+               if (!IsListEmpty(&ArrivalList))
+               {
+                  PLIST_ENTRY head = &ArrivalList;
+                  PLIST_ENTRY pos  = head->Flink;
+                  while (pos != head)
+                  {
+                     PQC_DEV_ITEM pCandidate = CONTAINING_RECORD(pos, QC_DEV_ITEM, List);
+                     pos = pos->Flink;
+                     if (pCandidate->Info.Type == QC_DEV_TYPE_EUD &&
+                         StrCmpW((PCWSTR)pCandidate->DevDesc, wDevDesc) == 0)
+                     {
+                        RemoveEntryList(&pCandidate->List);
+                        pFound = pCandidate;
+                        break;
+                     }
+                  }
+               }
+               LeaveCriticalSection(&opLock);
+
+               if (pFound == NULL)
+               {
+                  QCD_Printf(Info, "ProcessEudDeviceQueue: EUD DEPARTURE <%ws> not in ArrivalList\n",
+                             wDevDesc);
+                  continue;
+               }
+
+               if (fNotifyCb != NULL)
+               {
+                  pFound->CbParams.DevDesc   = (PWCHAR)pFound->DevDesc;
+                  pFound->CbParams.DevName   = (PWCHAR)pFound->DevNameW;
+                  pFound->CbParams.IfName    = NULL;
+                  pFound->CbParams.Loc       = NULL;
+                  pFound->CbParams.DevPath   = NULL;
+                  pFound->CbParams.SerNum    = NULL;
+                  pFound->CbParams.SocVer    = NULL;
+                  pFound->CbParams.SerNumMsm = (PWCHAR)pFound->SerNumMsm;
+                  pFound->CbParams.HwId      = NULL;
+                  pFound->CbParams.ParentDev = NULL;
+                  pFound->CbParams.ParentLocationInfomation = NULL;
+                  pFound->CbParams.Mtu       = 0;
+                  pFound->CbParams.Protocol  = 0;
+                  pFound->CbParams.Flag = ((ULONG)QC_DEV_TYPE_EUD << 8) |
+                                          ((ULONG)QC_DEV_STATE_DEPARTURE << 4) | (ULONG)1;
+                  pFound->CbParams.DevDetails = std::make_unique<DevDetailsMap>();
+                  PVOID userCtx = CallerContext;
+                  QCD_Printf(Info, "<= DEPARTURE <%ws>SerNumMsm <%ws>\n",
+                             (PWCHAR)pFound->DevDesc, (PWCHAR)pFound->SerNumMsm);
+                  fNotifyCb(&pFound->CbParams, &userCtx);
+               }
+
+               /* Reset the cached device ID when the CTL peripheral departs.
+                * CTL represents the EUD device itself; when it departs the
+                * device has disconnected and the next initializeEudTrace()
+                * must re-query get_device_id_array for the new device ID. */
+               if (info.peripheral_type == EUD_PERIPH_TYPE_CTL)
+               {
+                  QcEud_ResetDeviceId();
+               }
+
+               // Return item to FreeList
+               EnterCriticalSection(&opLock);
+               pFound->reset();
+               pFound->DevDetails = std::make_unique<DevDetailsMap>();
+               InsertHeadList(&FreeList, &pFound->List);
+               LeaveCriticalSection(&opLock);
+            }
+         }
+      }
+
+      // -----------------------------------------------------------------------
+      // ProcessPendingEudArrivals
+      //   Called from RunDevMonitor after TryToAnnounce.  Scans ArrivalList for
+      //   EUD items that are still pending (Info.Flag == DEV_FLAG_NONE) and fires
+      //   fNotifyCb for any whose parent USB composite device has now appeared
+      //   (matched by SerNumMsm).
+      // -----------------------------------------------------------------------
+      VOID ProcessPendingEudArrivals(VOID)
+      {
+         // Collect items to announce (promote under lock, fire outside lock)
+         std::vector<PQC_DEV_ITEM> toAnnounce;
+
+         EnterCriticalSection(&opLock);
+         if (!IsListEmpty(&ArrivalList))
+         {
+            PLIST_ENTRY head = &ArrivalList;
+            PLIST_ENTRY pos  = head->Flink;
+            while (pos != head)
+            {
+               PQC_DEV_ITEM pEud = CONTAINING_RECORD(pos, QC_DEV_ITEM, List);
+               pos = pos->Flink;
+
+               if (pEud->Info.Type != QC_DEV_TYPE_EUD || pEud->Info.Flag != DEV_FLAG_NONE)
+                  continue;
+
+               // Check if the parent USB device is now in ArrivalList
+               BOOL parentFound = FALSE;
+               PLIST_ENTRY pos2 = head->Flink;
+               while (pos2 != head)
+               {
+                  PQC_DEV_ITEM pUsb = CONTAINING_RECORD(pos2, QC_DEV_ITEM, List);
+                  pos2 = pos2->Flink;
+                  if (pUsb->Info.Type == QC_DEV_TYPE_EUD) continue;
+                  if ((pEud->SerNumMsm[0] != 0 || pEud->SerNumMsm[1] != 0) &&
+                      StrCmpW((PCWSTR)pEud->SerNumMsm, (PCWSTR)pUsb->SerNumMsm) == 0)
+                  {
+                     parentFound = TRUE;
+                     break;
+                  }
+               }
+
+               if (parentFound)
+               {
+                  pEud->Info.Flag = DEV_FLAG_ARRIVAL;
+                  toAnnounce.push_back(pEud);
+               }
+            }
+         }
+         LeaveCriticalSection(&opLock);
+
+         // Fire callbacks outside the lock
+         for (PQC_DEV_ITEM pEud : toAnnounce)
+         {
+            if (fNotifyCb != NULL)
+            {
+               pEud->CbParams.DevDesc   = (PWCHAR)pEud->DevDesc;
+               pEud->CbParams.DevName   = (PWCHAR)pEud->DevNameW;
+               pEud->CbParams.IfName    = NULL;
+               pEud->CbParams.Loc       = NULL;
+               pEud->CbParams.DevPath   = NULL;
+               pEud->CbParams.SerNum    = NULL;
+               pEud->CbParams.SocVer    = NULL;
+               pEud->CbParams.SerNumMsm = (PWCHAR)pEud->SerNumMsm;
+               pEud->CbParams.HwId      = NULL;
+               pEud->CbParams.ParentDev = NULL;
+               pEud->CbParams.ParentLocationInfomation = NULL;
+               pEud->CbParams.Mtu       = 0;
+               pEud->CbParams.Protocol  = 0;
+               pEud->CbParams.Flag = ((ULONG)QC_DEV_TYPE_EUD << 8) |
+                                      ((ULONG)QC_DEV_STATE_ARRIVAL << 4) | (ULONG)1;
+               pEud->CbParams.DevDetails = std::make_unique<DevDetailsMap>();
+               PVOID userCtx = CallerContext;
+               QCD_Printf(Info, "=> ARRIVAL (deferred, parent now present) <%ws> SerNumMsm <%ws>\n",
+                          (PWCHAR)pEud->DevDesc, (PWCHAR)pEud->SerNumMsm);
+               fNotifyCb(&pEud->CbParams, &userCtx);
+            }
+         }
+      }
+
       VOID InitializeLists(VOID)
       {
          int i;
@@ -55,43 +520,29 @@ namespace QcDevice
          InitializeListHead(&AnnouncementList);
          for (i = 0; i < MAX_NUM_DEV; i++)
          {
-            pItem = (PQC_DEV_ITEM)malloc(sizeof(QC_DEV_ITEM));
-            if (pItem == NULL)
+            pItem = new(std::nothrow) QC_DEV_ITEM();
+            if (pItem == nullptr)
             {
-               break;
+               QCD_Printf(Info, "Failed to allocate memory for QC_DEV_ITEM\n");
             }
-            pItem->Info.Type = QC_DEV_TYPE_NONE;
-            pItem->Info.Flag = DEV_FLAG_NONE;
-            pItem->Info.IsQCDriver = 0;
-            pItem->UserContext = NULL;
-            pItem->InterfaceNumber = 0xFF;
-            ZeroMemory(pItem->DevDesc, QC_MAX_VALUE_NAME);
-            ZeroMemory(pItem->DevDescA, QC_MAX_VALUE_NAME);
-            ZeroMemory(pItem->DevNameW, QC_MAX_VALUE_NAME);
-            ZeroMemory(pItem->DevNameA, QC_MAX_VALUE_NAME);
-            ZeroMemory(pItem->HwId, QC_MAX_VALUE_NAME);
-            ZeroMemory(pItem->ParentDev, QC_MAX_VALUE_NAME);
-            ZeroMemory(pItem->InterfaceName, QC_MAX_VALUE_NAME);
-            ZeroMemory(pItem->SerNum, 256);
-            ZeroMemory(pItem->SocVer, 256);
-            ZeroMemory(pItem->SerNumMsm, 256);
-            ZeroMemory(pItem->PortNos, 256);
-            pItem->DevDetails = new std::unordered_map<std::string, std::string>();
-            InsertTailList(&FreeList, &(pItem->List));
+            else
+            {
+               InsertTailList(&FreeList, &(pItem->List));
+            }
          }
-         NotifyStore = (PQC_NOTIFICATION_STORE)malloc(sizeof(QC_NOTIFICATION_STORE) * 512);
-         if (NotifyStore == NULL)
+         NotifyStore = new(std::nothrow) QC_NOTIFICATION_STORE[512];
+         if (NotifyStore == nullptr)
          {
-            QCD_Printf(Error, "Failed to alloc notification store\n");
+            QCD_Printf(Info, "Failed to allocate memory for QC_NOTIFICATION_STORE array.");
          }
          else
          {
             for (i = 0; i < 512; i++)
             {
-               InitializeListHead(&(NotifyStore[i].DevItemChain));
                InsertTailList(&NotifyFreeList, &(NotifyStore[i].List));
             }
          }
+
       }  // InitializeLists
 
       VOID CleanupList(PLIST_ENTRY ItemList)
@@ -104,12 +555,7 @@ namespace QcDevice
          {
             pEntry = RemoveHeadList(ItemList);
             pItem = CONTAINING_RECORD(pEntry, QC_DEV_ITEM, List);
-            if (pItem->DevDetails) 
-            { 
-               delete pItem->DevDetails; 
-               pItem->DevDetails = nullptr; 
-            }
-            free(pItem);
+            delete pItem;
          }
          LeaveCriticalSection(&opLock);
       }  // CleanupList
@@ -187,10 +633,13 @@ namespace QcDevice
                   if ((StrCmp((LPCWSTR)pActive->DevDesc, (LPCWSTR)pArrival->DevDesc) == 0) &&
                       (StrCmp((LPCWSTR)pActive->DevNameW, (LPCWSTR)pArrival->DevNameW) == 0))
                   {
-                     if (StrCmp((LPCWSTR)pActive->SerNum, (LPCWSTR)pArrival->SerNum) == 0)
+                     if ((StrCmp((LPCWSTR)pActive->SerNum, (LPCWSTR)pArrival->SerNum) == 0) &&
+                         (pActive->Generation == pArrival->Generation))
                      {
                         pActive->Info.Flag = pArrival->Info.Flag = DEV_FLAG_ARRIVAL;
                      }
+                     // Generation mismatch: device re-enumerated — old entry stays
+                     // DEV_FLAG_NONE (departs), new entry stays DEV_FLAG_NONE (re-arrives).
                   }
                }  // while
             }  // while
@@ -214,9 +663,9 @@ namespace QcDevice
             pArrival = CONTAINING_RECORD(headOfArrival, QC_DEV_ITEM, List);
             if (pArrival->Info.Flag == DEV_FLAG_NONE)
             {
-               PQC_DEV_ITEM pDevice;
+                PQC_DEV_ITEM pDevice = NULL;
 
-               pDevice = (PQC_DEV_ITEM)malloc(sizeof(QC_DEV_ITEM));
+               pDevice = new(std::nothrow) QC_DEV_ITEM();
                pArrival->Info.Flag = DEV_FLAG_ARRIVAL;
                if ((storeBranch == NULL) || (hAnnouncementThread == 0) || (pDevice == NULL))
                {
@@ -237,47 +686,37 @@ namespace QcDevice
                                                ((ULONG)1 << 4)                    |
                                                ((ULONG)pArrival->BusType << 16)   |
                                                (ULONG)pArrival->Info.IsQCDriver;
-                     pArrival->CbParams.DevDetails = new std::unordered_map<std::string, std::string>();
-                     if (pArrival->DevDetails) 
-                     { 
-                        *(pArrival->CbParams.DevDetails) = *(pArrival->DevDetails); 
+                     if (pArrival->DevDetails) {
+                         pArrival->CbParams.DevDetails = std::make_unique<DevDetailsMap>(*(pArrival->DevDetails));
                      }
+
                      if (CallerContext != NULL)
                      {
                         pArrival->UserContext = CallerContext;
                      }
                      fNotifyCb(&(pArrival->CbParams), &pArrival->UserContext);
-                     if (pArrival->CbParams.DevDetails) 
-                     { 
-                        delete pArrival->CbParams.DevDetails; 
-                        pArrival->CbParams.DevDetails = nullptr; 
-                     }
                      QCD_Printf(Debug, "<%ws> New arrival HWID [%ws]\n", pArrival->DevDesc, pArrival->HwId);
                   }
                }
                else  // send to announcement thread
                {
-                  CopyMemory((PVOID)pDevice, (PVOID)pArrival, sizeof(QC_DEV_ITEM));
-                  pDevice->Context = (PVOID)pArrival;
-                  pDevice->DevDetails = new std::unordered_map<std::string, std::string>();
-                  if (pArrival->DevDetails) 
-                  { 
-                     *(pDevice->DevDetails) = *(pArrival->DevDetails); 
+                   if (pDevice) {
+                       delete pDevice;
+                       pDevice = nullptr;
+                   }
+                  pDevice = new(std::nothrow) QC_DEV_ITEM(*pArrival);
+                  if (pDevice != nullptr)
+                  {
+                     pDevice->Context = (PVOID)pArrival;
+                     InsertTailList(&(storeBranch->DevItemChain), &pDevice->List);
+                     QCD_Printf(Debug, "<%ws> storing arrival HWID in DevItemChain [%ws]\n", pArrival->DevDesc, pArrival->HwId);
                   }
-                  InsertTailList(&(storeBranch->DevItemChain), &pDevice->List);
-                  QCD_Printf(Debug, "<%ws> storing arrival HWID in DevItemChain [%ws]\n", pArrival->DevDesc, pArrival->HwId);
                }
                InsertTailList(&ArrivalList, &pArrival->List); // ArrivalList is ActiveList
             }
             else
             {
-               if (pArrival->DevDetails) 
-               { 
-                  delete pArrival->DevDetails; 
-                  pArrival->DevDetails = nullptr;
-               }
-               ZeroMemory(pArrival, sizeof(QC_DEV_ITEM));
-               pArrival->DevDetails = new std::unordered_map<std::string, std::string>();
+               pArrival->reset();
                InsertTailList(&FreeList, &pArrival->List);
             }
          }  // while
@@ -292,11 +731,18 @@ namespace QcDevice
             {
                pActive = CONTAINING_RECORD(peekActive, QC_DEV_ITEM, List);
                peekActive = peekActive->Flink;
+
+               //EUD devices must be taken care in its own function and not in this
+               if (pActive->Info.Type == QC_DEV_TYPE_EUD)
+               {
+                  continue;
+               }
+
                if (pActive->Info.Flag == DEV_FLAG_NONE)
                {
-                  PQC_DEV_ITEM pDevice;
+                  PQC_DEV_ITEM pDevice = NULL;
 
-                  pDevice = (PQC_DEV_ITEM)malloc(sizeof(QC_DEV_ITEM));
+                  pDevice = new(std::nothrow) QC_DEV_ITEM();
                   RemoveEntryList(&pActive->List);
                   if ((storeBranch == NULL) || (hAnnouncementThread == 0) || (pDevice == NULL))
                   {
@@ -316,11 +762,10 @@ namespace QcDevice
                         pActive->CbParams.Flag = ((ULONG)pActive->Info.Type << 8 ) |
                                                  ((ULONG)pActive->BusType << 16)  |
                                                  pActive->Info.IsQCDriver;
-                        pActive->CbParams.DevDetails = new std::unordered_map<std::string, std::string>();
-                        if (pActive->DevDetails) 
-                        { 
-                           *(pActive->CbParams.DevDetails) = *(pActive->DevDetails); 
+                        if (pActive->DevDetails) {
+                            pActive->CbParams.DevDetails = std::make_unique<DevDetailsMap>(*(pActive->DevDetails));
                         }
+
 
                         if (CallerContext != NULL)
                         {
@@ -328,13 +773,11 @@ namespace QcDevice
                         }
                         fNotifyCb
                         (
-                           &(pActive->CbParams),
-                           &pActive->UserContext
+                            &(pActive->CbParams),
+                            &pActive->UserContext
                         );
-                        if (pActive->CbParams.DevDetails) 
-                        { 
-                           delete pActive->CbParams.DevDetails; 
-                           pActive->CbParams.DevDetails = nullptr; 
+                        if (pActive->Info.Type == QC_DEV_TYPE_EUD) {
+                           QcEud_RemoveByName((PVOID)pActive->DevDesc);
                         }
                         QCD_Printf(Debug, "<%ws> ActiveList  HWID [%ws]\n", pArrival->DevDesc, pActive->HwId);
                      }
@@ -342,21 +785,18 @@ namespace QcDevice
                   else
                   {
                      pActive->Info.Flag = DEV_FLAG_DEPARTURE;
-                     CopyMemory((PVOID)pDevice, (PVOID)pActive, sizeof(QC_DEV_ITEM));
-                     pDevice->DevDetails = new std::unordered_map<std::string, std::string>();
-                     if (pActive->DevDetails) 
-                     { 
-                        *(pDevice->DevDetails) = *(pActive->DevDetails); 
+                     if (pDevice) {
+                         delete pDevice;
+                         pDevice = nullptr;
                      }
-                     InsertTailList(&(storeBranch->DevItemChain), &pDevice->List);
-					 QCD_Printf(Debug, "<%ws> storing departure in DevItemChain HWID [%ws]\n", pArrival->DevDesc, pArrival->HwId);
+                     pDevice = new(std::nothrow) QC_DEV_ITEM(*pActive);
+                     if (pDevice != nullptr)
+                     {
+                        InsertTailList(&(storeBranch->DevItemChain), &pDevice->List);
+					         QCD_Printf(Debug, "<%ws> storing departure in DevItemChain HWID [%ws]\n", pArrival->DevDesc, pArrival->HwId);
+                     }
                   }
-                  if (pActive->DevDetails) 
-                  { 
-                     delete pActive->DevDetails; 
-                  }
-                  ZeroMemory(pActive, sizeof(QC_DEV_ITEM));
-                  pActive->DevDetails = new std::unordered_map<std::string, std::string>();
+                  pActive->reset();
                   InsertTailList(&FreeList, &pActive->List);
                }
                else
@@ -425,11 +865,9 @@ namespace QcDevice
                                               ((ULONG)devItem->BusType << 16)  |
                                               ((ULONG)1 << 4)                  |
                                               (ULONG)devItem->Info.IsQCDriver;
-                     devItem->CbParams.DevDetails = new std::unordered_map<std::string, std::string>();
-                     if (devItem->DevDetails) 
-					 { 
-					    *(devItem->CbParams.DevDetails) = *(devItem->DevDetails); 
-					 }
+                     if (devItem->DevDetails) {
+                         devItem->CbParams.DevDetails = std::make_unique<DevDetailsMap>(*(devItem->DevDetails));
+                     }
 					 CheckDeviceActiveState(devItem->CbParams.DevName);
                      QCD_Printf(Info, "=> ARRIVAL: <%ws> pItem 0x%p - 0x%p - 0x%p\n", (PWCHAR)devItem->DevDesc,
                                  devItem, devItem->Context, &(devItem->CbParams));
@@ -461,11 +899,10 @@ namespace QcDevice
                      devItem->CbParams.Flag = ((ULONG)devItem->Info.Type << 8) |
                                               ((ULONG)devItem->BusType << 16)  |
                                               (ULONG)devItem->Info.IsQCDriver;
-                     devItem->CbParams.DevDetails = new std::unordered_map<std::string, std::string>();
-                     if (devItem->DevDetails) 
-                     { 
-                        *(devItem->CbParams.DevDetails) = *(devItem->DevDetails); 
+                     if (devItem->DevDetails) {
+                         devItem->CbParams.DevDetails = std::make_unique<DevDetailsMap>(*(devItem->DevDetails));
                      }
+
                      QCD_Printf(Info, "DEPARTURE: <%ws>\n", (PWCHAR)devItem->DevDesc);
 
                      if (CallerContext != NULL)
@@ -477,20 +914,14 @@ namespace QcDevice
                         &(devItem->CbParams),
                         &devItem->UserContext
                      );
+                     if (devItem->Info.Type == QC_DEV_TYPE_EUD) {
+                        QcEud_RemoveByName((PVOID)devItem->DevDesc);
+                     }
                      QCD_Printf(Debug, "===>>>   HWID [%ws]\n", devItem->HwId);
                   }
                }
-               if (devItem->CbParams.DevDetails) 
-               { 
-                  delete devItem->CbParams.DevDetails; 
-                  devItem->CbParams.DevDetails = nullptr; 
-               }
-               if (devItem->DevDetails) 
-               { 
-                  delete devItem->DevDetails; 
-                  devItem->DevDetails = nullptr; 
-               }
-               free(devItem);
+
+               delete devItem;
             }
             EnterCriticalSection(&notifyLock);
             InsertTailList(&NotifyFreeList, &(storeBranch->List)); // recycle
@@ -536,11 +967,10 @@ namespace QcDevice
                      devItem->CbParams.Flag = (((ULONG)devItem->Info.Type << 8) |
                                                ((ULONG)1 << 4) |
                                                (ULONG)devItem->Info.IsQCDriver);
-                     devItem->CbParams.DevDetails = new std::unordered_map<std::string, std::string>();
-                     if (devItem->DevDetails) 
-					 { 
-					    *(devItem->CbParams.DevDetails) = *(devItem->DevDetails); 
-					 }
+                     if (devItem->DevDetails)
+                     {
+                         devItem->CbParams.DevDetails = std::make_unique<DevDetailsMap>(*(devItem->DevDetails));
+                     }
 					 CheckDeviceActiveState(devItem->CbParams.DevName);
                      QCD_Printf(Info, "==>> ARRIVAL: <%ws>\n", (PWCHAR)devItem->DevDesc);
                      if (CallerContext != NULL)
@@ -569,10 +999,10 @@ namespace QcDevice
                      devItem->CbParams.HwId = (PWCHAR)devItem->HwId;
                      devItem->CbParams.ParentDev = (PWCHAR)devItem->ParentDev;
                      devItem->CbParams.Flag = (((ULONG)devItem->Info.Type << 8) | (ULONG)devItem->Info.IsQCDriver);
-                     devItem->CbParams.DevDetails = new std::unordered_map<std::string, std::string>();
+
                      if (devItem->DevDetails) 
 					 { 
-					    *(devItem->CbParams.DevDetails) = *(devItem->DevDetails); 
+                         devItem->CbParams.DevDetails = std::make_unique<DevDetailsMap>(*(devItem->DevDetails));
 					 }
                      QCD_Printf(Info, "DEPARTURE: <%ws>\n", (PWCHAR)devItem->DevDesc);
                      if (CallerContext != NULL)
@@ -584,20 +1014,13 @@ namespace QcDevice
                         &(devItem->CbParams),
                         &devItem->UserContext
                      );
+                     if (devItem->Info.Type == QC_DEV_TYPE_EUD) {
+                        QcEud_RemoveByName((PVOID)devItem->DevDesc);
+                     }
                      QCD_Printf(Debug, "=====>>>>>   HWID [%ws]\n", devItem->HwId);
                   }
                }
-               if (devItem->CbParams.DevDetails) 
-               { 
-                  delete devItem->CbParams.DevDetails; 
-                  devItem->CbParams.DevDetails = nullptr; 
-               }
-               if (devItem->DevDetails) 
-               { 
-                  delete devItem->DevDetails; 
-                  devItem->DevDetails = nullptr; 
-               }
-               free(devItem);
+               delete devItem;
             }
             EnterCriticalSection(&notifyLock);
             InsertTailList(&NotifyFreeList, &(storeBranch->List)); // recycle
@@ -963,7 +1386,8 @@ namespace QcDevice
          int DevType,
          BOOL *IsActive,
          BOOL *IsQCDriver,
-         ULONG DevStatus
+         ULONG DevStatus,
+         PDWORD pGeneration
       )
       {
          WCHAR sysKeyPath[REG_HW_ID_SIZE];
@@ -1042,12 +1466,22 @@ namespace QcDevice
                   *IsActive = TRUE;  // Best Effort -- let system devnode status make final call but may not be reliable
                }
                *IsQCDriver = TRUE;
+
+               // Read QCDeviceGeneration — incremented by the driver on every
+               // PrepareHardware so TryToAnnounce can detect a re-enumeration
+               // even when DevDesc/DevName/SerNum are identical.
+               DWORD genVal = 0;
+               DWORD genLen = sizeof(DWORD);
+               RegQueryValueEx(hSwSysKey, TEXT(QC_SPEC_GENERATION),
+                               NULL, NULL, (LPBYTE)&genVal, &genLen);
+               *pGeneration = genVal;
             }
             else
             {
                // not a QC driver
                *IsActive = TRUE;
                *IsQCDriver = FALSE;
+               *pGeneration = 0;
             }
 
             regLen = 256;
@@ -1241,7 +1675,7 @@ namespace QcDevice
             }
 
             // Retrieve the symbolic link name
-            //sysKeyPath[0] = 0; // ??? why are wedoing zero here?
+            //sysKeyPath[0] = 0; // ??? why we are doing zere here?
             regLen = QC_MAX_VALUE_NAME;
             if ((DevType == QC_DEV_TYPE_PORTS) || (DevType == QC_DEV_TYPE_MDM))
             {
@@ -1607,7 +2041,7 @@ namespace QcDevice
           QCD_Printf(Debug, "String:  %ws\n", input);
           if (!input || wcslen(input) == 0)
           {
-              QCD_Printf(Error, "ParseDevDesc: Invalid or empty input\n");
+              QCD_Printf(Debug, "ParseDevDesc: Invalid or empty input\n");
               return ;
           }
 
@@ -1776,6 +2210,7 @@ namespace QcDevice
          UCHAR           devType = QC_DEV_TYPE_NONE, busType = QC_DEV_BUS_TYPE_NONE;
          PBYTE           pDevName = NULL;
          BOOL            bActive = FALSE, bQCDriver = FALSE, bInstanceIdOK = FALSE;
+         DWORD           generation = 0;
          PQC_DEV_ITEM    pItem = NULL;
          PTSTR           pSwIdx = NULL;
          BOOL            bAdbDetected;
@@ -1862,11 +2297,12 @@ namespace QcDevice
                     // for snapdragon processor support
                     bMatch = !bProcessorAdded;
                 }
-                else if (((FeatureSetting.User.DeviceClass & DEV_CLASS_NET) != 0)   ||
-                    ((FeatureSetting.User.DeviceClass & DEV_CLASS_MDM) != 0)        ||
-                    ((FeatureSetting.User.DeviceClass & DEV_CLASS_PORTS) != 0)      ||
-                    ((FeatureSetting.User.DeviceClass & DEV_CLASS_LIBUSB) != 0)     ||
-                    ((FeatureSetting.User.DeviceClass & DEV_CLASS_USB) != 0)        ||
+                else if (((FeatureSetting.User.DeviceClass & DEV_CLASS_NET) != 0)     ||
+                    ((FeatureSetting.User.DeviceClass & DEV_CLASS_MDM) != 0)          ||
+                    ((FeatureSetting.User.DeviceClass & DEV_CLASS_PORTS) != 0)        ||
+                    ((FeatureSetting.User.DeviceClass & DEV_CLASS_LIBUSB) != 0)       ||
+                    ((FeatureSetting.User.DeviceClass & DEV_CLASS_SAHARA) != 0)       ||
+                    ((FeatureSetting.User.DeviceClass & DEV_CLASS_USB) != 0)          ||
                     ((FeatureSetting.User.DeviceClass & DEV_CLASS_ADB) != 0))
                 {
                    // QCD_Printf("Inspecting DevClass <%ws>\n", (PTSTR)devClass);
@@ -1969,11 +2405,6 @@ namespace QcDevice
                          {
                             bMatch = FALSE;
                          }
-                      }
-                      else
-                      {
-                         // For QIL we just need EDL devices which is always USB, others are not required
-                         bMatch = FALSE;
                       }
                    }
                    // QCD_Printf("Matched class <%ws>... devType %d\n", (PTSTR)devClass, devType);
@@ -2195,11 +2626,11 @@ namespace QcDevice
                  // nodes mid-PnP-publish right after arrival / mode switch).
                  DWORD err = GetLastError();
                  if (err == ERROR_NOT_FOUND) {
-                     QCD_Printf(Data,
+                     QCD_Printf(Debug,
                          "%d: DEVPKEY_Device_LocationPaths not present (err=%lu type=%u)\n",
                          __LINE__, err, (unsigned)type);
                  } else {
-                     QCD_Printf(Warn,
+                     QCD_Printf(Debug,
                          "%d: DEVPKEY_Device_LocationPaths failed err=%lu type=%u\n",
                          __LINE__, err, (unsigned)type);
                  }
@@ -2236,8 +2667,8 @@ namespace QcDevice
 
              // Builds the port-number chain on ACPI-enumerated USB controllers
              // for Snapdragon X Elite ARM64 based processor
-             if ((portnos.empty() || wcsstr(LocationPath, L"ACPI(") != NULL) &&
-                StrStrW((PTSTR)devClass, TEXT(D_CLASS_LIBUSB)) != NULL)
+              if ((portnos.empty() || wcsstr(LocationPath, L"ACPI(") != NULL) &&
+                  StrStrW((PTSTR)devClass, TEXT(D_CLASS_LIBUSB)) != NULL)
              {
                  portnos = GetUsbPortChainFromCmTree(devInfoData.DevInst);
                  if (!portnos.empty())
@@ -2252,7 +2683,7 @@ namespace QcDevice
                  }
              }
 
-             QCD_Printf(Info, "Location Path: %ws, portnos: %s\n", LocationPath, portnos.c_str());
+             QCD_Printf(Debug, "Location Path: %ws, portnos: %s\n", LocationPath, portnos.c_str());
              StringCchCopyW(driverKeyPath, REG_HW_ID_SIZE, TEXT(QC_REG_SW_KEY));
              StringCchCatW(driverKeyPath, REG_HW_ID_SIZE, (PTSTR)driverKey);
              WideCharToMultiByte(CP_ACP, 0, driverKeyPath, -1, driverKeyPathNew, REG_HW_ID_SIZE, NULL, NULL);
@@ -2379,6 +2810,7 @@ namespace QcDevice
              if ((bInstanceIdOK == TRUE) && ((devType == QC_DEV_TYPE_PORTS) || (devType == QC_DEV_TYPE_MDM)))
              {
            
+                generation = 0;
                 pDevName = ValidateDevice
                            (
                               (PTSTR)driverKey,
@@ -2395,11 +2827,13 @@ namespace QcDevice
                               devType,
                               &bActive,
                               &bQCDriver,
-                              devStatus
+                              devStatus,
+                              &generation
                            );
              }
              else
              {
+                generation = 0;
                 pDevName = ValidateDevice
                            (
                               (PTSTR)driverKey,
@@ -2416,12 +2850,25 @@ namespace QcDevice
                               devType,
                               &bActive,
                               &bQCDriver,
-                              devStatus
+                              devStatus,
+                              &generation
                            );
              }
              
              if (bActive == TRUE)
              {
+                /* Gate non-QC PORTS/MDM on DEV_FEATURE_INCLUDE_NONE_QC_PORTS */
+                if ((bQCDriver == FALSE) &&
+                    (devType == QC_DEV_TYPE_PORTS || devType == QC_DEV_TYPE_MDM) &&
+                    ((FeatureSetting.User.Settings & DEV_FEATURE_INCLUDE_NONE_QC_PORTS) == 0))
+                {
+                    EnterCriticalSection(&opLock);
+                    InsertHeadList(&FreeList, &pItem->List);
+                    LeaveCriticalSection(&opLock);
+                    memberIdx++;
+                    continue;
+                }
+
                 if (pItem != NULL)
                 {
                    size_t rtnBytes;
@@ -2468,6 +2915,41 @@ namespace QcDevice
 
                    GetDeviceInterfaceNumberFromHwId((PTSTR)hwId, &pItem->InterfaceNumber);
                    pItem->CbParams.Protocol = funcProtocol;
+
+                   /* If DEV_CLASS_SAHARA is subscribed and the protocol is Sahara-family,
+                    * override devType and apply optional sub-protocol mask filter. */
+                   if ((FeatureSetting.User.DeviceClass & DEV_CLASS_SAHARA) != 0)
+                   {
+                       ULONG protoCategory = funcProtocol & DEV_PROTOCOL_MAJOR_REVISION_MASK;
+                       if (protoCategory == 0x10 || funcProtocol == DEV_PROTOCOL_FIREHOSE)
+                       {
+                           /* Apply sub-protocol mask if DeviceProtocol != 0 */
+                           if (FeatureSetting.User.DeviceProtocol != 0)
+                           {
+                               ULONG mask = 0;
+                               switch (funcProtocol)
+                               {
+                                   case DEV_PROTOCOL_SAHARA:                          mask = DEV_PROTOCOL_MASK_SAHARA;         break;
+                                   case DEV_PROTOCOL_SAHARA_PBL_EMERGENCY_DOWNLOAD:  mask = DEV_PROTOCOL_MASK_EDL;            break;
+                                   case DEV_PROTOCOL_SAHARA_PBL_FLASHLESS_BOOT:      mask = DEV_PROTOCOL_MASK_FLASHLESS_BOOT; break;
+                                   case DEV_PROTOCOL_SAHARA_SBL_XBL_RAMDUMP:         mask = DEV_PROTOCOL_MASK_RAMDUMP;        break;
+                                   case DEV_PROTOCOL_SAHARA_TN_APPS_Remote_EFS:      mask = DEV_PROTOCOL_MASK_EFS;            break;
+                                   case DEV_PROTOCOL_FIREHOSE:                        mask = DEV_PROTOCOL_MASK_FIREHOSE;       break;
+                                   default:                                            mask = 0;                               break;
+                               }
+                               if ((FeatureSetting.User.DeviceProtocol & mask) == 0)
+                               {
+                                   /* Sub-protocol not subscribed-skip this device */
+                                   EnterCriticalSection(&opLock);
+                                   InsertHeadList(&FreeList, &pItem->List);
+                                   LeaveCriticalSection(&opLock);
+                                   memberIdx++;
+                                   continue;
+                               }
+                           }
+                           pItem->Info.Type = QC_DEV_TYPE_SAHARA;
+                       }
+                   }
                    pItem->CbParams.Mtu = (ULONG)mtu;
                    pItem->BusType = busType;
                    StringCchCopy((PTSTR)pItem->DevDesc, QC_MAX_VALUE_NAME/2, (PTSTR)friendlyName);
@@ -2510,6 +2992,7 @@ namespace QcDevice
                    StringCchCopy((PTSTR)pItem->SerNumMsm, 128, (PTSTR)serNumMsm);
                    StringCchCopyA(pItem->PortNos, 128, portnos.c_str());
                    QCD_Printf(Debug, "PortNos <%s>\n", pItem->PortNos);
+                   pItem->Generation = generation;
                    // Since we need the parent location so find parent is necessary for every enumeration, use the DevDesc
                    // if ((parentDev[0] == 0) && (parentDev[1] == 0))
                    {
@@ -2569,12 +3052,20 @@ namespace QcDevice
                hAnnouncementThread = ::CreateThread(NULL, 0, AnnouncementThread, NULL, 0, &tid);
                SetEvent(hMonitorStartedEvt);
             }
+            // Drain any EUD device events queued by EudDeviceChangeCb first,
+            // before the (potentially slow) ScanDevices() call, so that EUD
+            // arrival/departure notifications reach the upper layer with
+            // minimal latency regardless of how long the Windows device scan takes.
+            ProcessEudDeviceQueue();
             // if (status == WAIT_OBJECT_0)
             if (status < QC_REG_MAX)
             {
                 //QCD_Printf(Info, "scanning with alert %u...\n", status);
                ScanDevices();
                TryToAnnounce(&ArrivalList, &NewArrivalList);
+               // Fire callbacks for EUD devices that were waiting for their
+               // parent USB composite device to appear in ArrivalList.
+               ProcessPendingEudArrivals();
             }
             status = MonitorDeviceChange();
             //GetDriverVersion();
@@ -2587,7 +3078,7 @@ namespace QcDevice
 
          if (NotifyStore != NULL)
          {
-            free(NotifyStore);
+             delete[] NotifyStore;
          }
          QCD_Printf(Info, "exiting device monitor...\n");
          SetEvent(hStopMonitorEvt);  // signal after cleaning up
@@ -2734,6 +3225,9 @@ QCDEVLIB_API VOID QcDevice::StartDeviceMonitor(VOID)
       {
          initialize_libusb();
       }
+
+      InitializeCriticalSection(&eudQueueLock_);
+      QcEud_LoadLib();
       hMonitorThread = ::CreateThread(NULL, 0, RunDevMonitor, NULL, 0, &tid);
       if (hMonitorThread == NULL)
       {
@@ -2741,6 +3235,7 @@ QCDEVLIB_API VOID QcDevice::StartDeviceMonitor(VOID)
       }
       WaitForSingleObject(hMonitorStartedEvt, 5000);
       CloseHandle(hMonitorStartedEvt);  // dispose
+      QcEud_StartMonitor(EudDeviceChangeCb);
    }
 
    InterlockedDecrement(&lInOperation);
@@ -2768,8 +3263,8 @@ QCDEVLIB_API VOID QcDevice::StopDeviceMonitor(VOID)
    CloseHandle(hAnnouncementEvt);
    CloseHandle(hAnnouncementExitEvt);
    CloseHandle(hStopMonitorEvt);
-
-   if (is_libusb_loaded())
+   QcEud_StopMonitor();
+    if (is_libusb_loaded())
    {
          deinitialize_libusb();
    }
@@ -2778,6 +3273,8 @@ QCDEVLIB_API VOID QcDevice::StopDeviceMonitor(VOID)
       QCD_Printf(Info, "libusb DLL not found at QUD-Userspace DriverPackage path, skipping libusb deinitialization\n");
    }
    _IsQcomLibusbEnable = FALSE;
+   QcEud_Cleanup();
+   DeleteCriticalSection(&eudQueueLock_);
 
    for (i = QC_REG_DEVMAP; i < QC_REG_MAX; i++)
    {
@@ -2790,17 +3287,59 @@ QCDEVLIB_API VOID QcDevice::StopDeviceMonitor(VOID)
    QCD_Printf(Info, "%s", __func__);
 }  // StopDeviceMonitor
 
+QCDEVLIB_API BOOL QcDevice::initializeEudTrace(VOID) {
+    if (!QcEud_Initialize())
+    {
+        QCD_Printf(Error, "initializeEudTrace: QcEud_Initialize failed\n");
+        return FALSE;
+    }
+    return TRUE;
+}
+
+
+QCDEVLIB_API BOOL QcDevice::startAmbientMode(VOID) {
+    EUD_ERR_t err = QcEud_SpoofUsbDetach();
+    if (err == EUD_SUCCESS)
+    {
+        QCD_Printf(Info, "startAmbientMode: SpoofUsbDetach succeeded");
+    }
+    else
+    {
+        QCD_Printf(Error, "startAmbientMode: SpoofUsbDetach failed (err=%d)", err);
+    }
+    return (err == EUD_SUCCESS) ? TRUE : FALSE;
+}
+
+QCDEVLIB_API BOOL QcDevice::stopAmbientMode(VOID) {
+    EUD_ERR_t err = QcEud_SpoofUsbAttach();
+    if (err == EUD_SUCCESS)
+    {
+        QCD_Printf(Info, "stopAmbientMode: SpoofUsbAttach succeeded");
+    }
+    else
+    {
+        QCD_Printf(Error, "stopAmbientMode: SpoofUsbAttach failed (err=%d)", err);
+    }
+    return (err == EUD_SUCCESS) ? TRUE : FALSE;
+}
+
 // =================== Removal Notification ====================
 QCDEVLIB_API VOID QcDevice::SetDeviceChangeCallback(DEVICECHANGE_CALLBACK Cb)
 {
    fNotifyCb = Cb;
    CallerContext = NULL;
+#ifdef   ALPACA_SUPPORT
+   setAlpacaDiscoveryCallback((AlpacaQuts::DEVICECHANGE_CALLBACK)Cb, CallerContext);
+#endif
 }  // SetDeviceChangeCallback
 
 QCDEVLIB_API VOID QcDevice::SetDeviceChangeCallback(DEVICECHANGE_CALLBACK Cb, PVOID AppContext)
 {
    fNotifyCb = Cb;
    CallerContext = AppContext;
+#ifdef   ALPACA_SUPPORT
+   setAlpacaDiscoveryCallback((AlpacaQuts::DEVICECHANGE_CALLBACK)Cb, CallerContext);
+#endif
 }  // SetDeviceChangeCallback
 
 QCDEVLIB_API VOID QcDevice::SetDeviceChangeCallback(DEVICECHANGE_CALLBACK_N Cb)
@@ -2811,6 +3350,9 @@ QCDEVLIB_API VOID QcDevice::SetDeviceChangeCallback(DEVICECHANGE_CALLBACK_N Cb)
 QCDEVLIB_API VOID QcDevice::SetLoggingCallback(QCD_LOGGING_CALLBACK Cb)
 {
    setLoggerCallback(Cb);
+#ifdef   ALPACA_SUPPORT
+   setAlpacaLoggingCallback((AlpacaQuts::QCD_LOGGING_CALLBACK)Cb);
+#endif
 }  // SetLoggingCallback
 
 QCDEVLIB_API VOID QcDevice::SetFeature(PVOID Settings)
@@ -2935,8 +3477,7 @@ QCDEVLIB_API ULONG QcDevice::GetDevice(PVOID UserBuffer)
          {
             DevInfo->Flag = (((ULONG)devItem->Info.Type << 8) | (ULONG)devItem->Info.IsQCDriver);
          }
-
-         free(devItem);
+         delete devItem;
          infoFilled = 1;
          break;
       }
@@ -3164,6 +3705,29 @@ QCDEVLIB_API HANDLE QcDevice::OpenDevice(PVOID DeviceName, DWORD Baudrate, BOOL 
                    return (res ? INVALID_HANDLE_VALUE : hDevice);
                }
            }
+           if (pDevInfo->Info.Type == QC_DEV_TYPE_EUD)
+           {
+               if (StrIntlEqN((PWCHAR)DeviceName, (PWCHAR)pDevInfo->DevDesc, wcslen((PWCHAR)pDevInfo->DevDesc)))
+               {
+                   // Store the full DevDesc as the map key so departure can
+                   // do an exact lookup without hardcoded keyword matching.
+                   if ((StrStrW((PWCHAR)DeviceName, L"Control")))
+                   {
+                       hDevice = QcEud_OpenDevice((PVOID)pDevInfo->DevDesc, QC_EUD_CTL_HANDLE);
+                   }
+                   else if ((StrStrW((PWCHAR)DeviceName, L"Trace")))
+                   {
+                       hDevice = QcEud_OpenDevice((PVOID)pDevInfo->DevDesc, QC_EUD_TRC_HANDLE);
+                   }
+                   else
+                   {
+                       QCD_Printf(Error, "OpenDevice: EUD device <%ws> is neither Control nor Trace\n", (PWCHAR)DeviceName);
+                       hDevice = INVALID_HANDLE_VALUE;
+                   }
+                   LeaveCriticalSection(&opLock);
+                   return hDevice;
+               }
+           }
        }
    }
    LeaveCriticalSection(&opLock);
@@ -3247,6 +3811,12 @@ QCDEVLIB_API VOID QcDevice::CloseDevice(HANDLE hDevice)
        QcomLibusbDevice::qcom_libusb_close(&hDevice);
    }
    else {
+       if (QcEud_FindHandle(hDevice))
+       {
+           QcEud_CloseDevice();
+           QcEud_UnregisterHandle(hDevice);
+           return;
+       }
        ::CloseHandle(hDevice);
    }
 }  // CloseDevice
@@ -3265,6 +3835,14 @@ QCDEVLIB_API BOOL QcDevice::ReadFromDevice
 
    QCD_Printf(Debug, "-->QcDevice::ReadFromDevice: 0x%x bufferSize %d bytes\n", hDevice, NumBytesToRead);
 
+   EUD_ERR_t err = EUD_SUCCESS;
+   if (QcEud_FindHandle(hDevice))
+   {
+       BOOL bErr = QcEud_ReadTrace(RxBuffer, NumBytesToRead, NumBytesReturned);
+       QCD_Printf(Debug, "-->QcDevice::EUD Trace ReadFromDevice: err=%d NumBytesReturned: %d\n", bErr, *NumBytesReturned);
+       return bErr;
+   }
+
    if (_IsQcomLibusbEnable == TRUE) {
        BOOL bytesTransferred = 0;
        bResult = QcomLibusbDevice::qcom_libusb_read(&hDevice, RxBuffer, NumBytesToRead, &bytesTransferred, 0);
@@ -3276,8 +3854,8 @@ QCDEVLIB_API BOOL QcDevice::ReadFromDevice
        }
        else if (bResult == LIBUSB_ERROR_TIMEOUT)
        {
-          QCD_Printf(Debug, "%s: Timeout!! Handle: 0x%x, readFrom %d bytes, ActualNumBytesReturned: %d\n", __func__, hDevice, NumBytesToRead, bytesTransferred);
-          return TRUE;
+           QCD_Printf(Debug, "%s: Timeout!! Handle: 0x%x, readFrom %d bytes, ActualNumBytesReturned: %d\n", __func__, hDevice, NumBytesToRead, bytesTransferred);
+           return TRUE;
        }
        else
        {

@@ -39,10 +39,8 @@ public:
     /// Whether the device monitor is currently running.
     bool is_monitor_running() const;
 
-    /// Enumerate devices grouped by composite parent.
-    /// @param filter  Protocol types to include. Empty = no filtering.
-    std::vector<DeviceInfo> enumerate_composite_devices(
-        const std::vector<ProtocolType>& filter = {PROT_DIAG, PROT_QDSS, PROT_ADPL});
+    /// Enumerate DIAG, QDSS, and ADPL devices grouped by composite parent.
+    std::vector<DeviceInfo> get_device_list();
 
     /// Opaque subscription token; pass to unsubscribe() to detach.
     using ListenerToken = uint64_t;

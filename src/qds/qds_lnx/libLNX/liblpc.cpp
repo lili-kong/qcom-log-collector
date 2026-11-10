@@ -37,15 +37,34 @@ typedef struct aioCbCtx {
     pthread_cond_t cond;
     ULONG   ret;
     PVOID UserData;
+    aioCbCtx() : ret(0), UserData(nullptr) {
+        pthread_mutex_init(&mutex, NULL);
+        pthread_cond_init(&cond, NULL);
+    }
+    ~aioCbCtx() {
+        pthread_mutex_destroy(&mutex);
+        pthread_cond_destroy(&cond);
+    }
 }AIO_CB_CTX, *PAIO_CB_CTX;
 
 typedef struct aioGblCtx {
     PDEVICE_CONTEXT     pAioDevCtx;
     struct aioGblCtx    *pNext;
+    aioGblCtx() : pAioDevCtx(nullptr), pNext(nullptr) {}
 } AIO_GBL_CTX, *PAIO_GBL_CTX;
 
 PAIO_GBL_CTX pAioGblCtx = NULL;
-
+_DEVICE_CONTEXT::_DEVICE_CONTEXT() : Cid(0), DevDepartureEvent(INVALID_HANDLE_VALUE),
+         ThHandle(INVALID_HANDLE_VALUE), DevHandle(INVALID_HANDLE_VALUE),
+         DevState(0), totalBytesOut(0), totalBytesIn(0), current_rx_bytes(0),
+         loopbk_data(nullptr), receiveBuf(nullptr), transferBuf(nullptr),
+         data_in_file(nullptr), data_out_file(nullptr),
+         counter_out(0), counter_in(0), verification_failure(0), inject_failure(0)
+{
+    memset(DevName,       0, sizeof(DevName));
+    memset(SymbolicName,  0, sizeof(SymbolicName));
+    memset(OutFileName,   0, sizeof(OutFileName));
+}
 // Logging callback, DLL directs log messages to Windows logging if CB is not set
 VOID LogMsgCb(PCHAR Msg)
 {
@@ -67,7 +86,7 @@ void *TriggerUserCb(void *Userdata)
        return NULL;
    }
 
-   pAioCtx = (PAIO_GBL_CTX)malloc(sizeof(struct aioGblCtx));
+   pAioCtx = new aioGblCtx();
    if (!pAioCtx)
    {
        printf("Unable to allocate memory");
@@ -102,8 +121,8 @@ void *TriggerUserCb(void *Userdata)
    {
        //pAioCtx = pAioCtx->pNext;
        pAioGblCtx = pAioGblCtx->pNext;
-       free(devCtx);
-       free(pTmpCtx);
+       delete devCtx;
+       delete pTmpCtx;
    }
    else
    {
@@ -115,8 +134,8 @@ void *TriggerUserCb(void *Userdata)
        if (pTmpCtx != NULL)
        {
            pPrevCtx->pNext = pTmpCtx->pNext;
-           free(devCtx);
-           free(pTmpCtx);
+           delete devCtx;
+           delete pTmpCtx;
        }
    }
 
@@ -152,7 +171,7 @@ VOID MyDeviceChangeCb(PCB_PARAMS CbParams, PVOID *Context)
       //if (CbParams->DevPid) //== )
 	  if(strstr((PCHAR)(CbParams->DevName),"QCOM_LPC_DEVICE") != NULL)
 	  {
-          devCtx = (PDEVICE_CONTEXT)malloc(sizeof(DEVICE_CONTEXT));
+      devCtx = new DEVICE_CONTEXT();
 
           devCtx->Cid = (ULONG)*Context;
           strncpy(devCtx->DevName, (char*)CbParams->DevDesc, QC_NAME_MAX);

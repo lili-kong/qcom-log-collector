@@ -173,12 +173,9 @@ public:
    {
       // Lock internal console mutex for synchronization
       std::lock_guard<std::mutex> lock(m_consoleMutex);
-
-      if (useStderr) {
-         std::cerr << text;
-      } else {
-         std::cout << text;
-      }
+      std::ostream& stream = (useStderr || optionEnabled(LogOption::ConsoleToStderr))
+         ? std::cerr : std::cout;
+      stream << text;
    }
 
    // Atomic console overwrite (for spinners) - write + flush in one operation
@@ -187,14 +184,10 @@ public:
    {
       // Lock internal console mutex for synchronization
       std::lock_guard<std::mutex> lock(m_consoleMutex);
-
-      if (useStderr) {
-         std::cerr << text;
-         std::cerr.flush();
-      } else {
-         std::cout << text;
-         std::cout.flush();
-      }
+      std::ostream& stream = (useStderr || optionEnabled(LogOption::ConsoleToStderr))
+         ? std::cerr : std::cout;
+      stream << text;
+      stream.flush();
    }
 
    /**
@@ -205,16 +198,14 @@ public:
     *
     * @param logFolderPath Directory where debug log files will be stored. Empty =
     * current working directory.
-    * @param ptraceFolderPath Directory where ptrace files will be stored. Empty =
-    * current working directory.
     * @param maxLinesPerFile Maximum lines per file before rotation (default:
     * 100,000). Set to 0 for unlimited.
     * @param maxBytesPerFile Maximum bytes per file before rotation (default:
     * 0 = unlimited). File rotates when either limit is reached.
     */
-   void init(const std::string& logFolderPath = LOG_DIR, const std::string& ptraceFolderPath = PTRACE_DIR, size_t maxLinesPerFile = KL::MAX_LOG_LINES, size_t maxBytesPerFile = 0, std::string appVersion = "")
+   void init(const std::string& logFolderPath = LOG_DIR, size_t maxLinesPerFile = KL::MAX_LOG_LINES, size_t maxBytesPerFile = 0, std::string appVersion = "")
    {
-      std::call_once(mInitFlag, [this, logFolderPath, ptraceFolderPath, maxLinesPerFile, maxBytesPerFile, appVersion]() {
+      std::call_once(mInitFlag, [this, logFolderPath, maxLinesPerFile, maxBytesPerFile, appVersion]() {
          mMaxLines = maxLinesPerFile;
          mMaxBytes = maxBytesPerFile;
          mAppVersion = appVersion;
@@ -230,18 +221,6 @@ public:
          else
          {
             set_directory_permissions(mLogDirectory);
-         }
-
-         // Resolve ptrace log directory
-         mPtraceDirectory = ptraceFolderPath.empty() ? std::filesystem::current_path() : std::filesystem::path(ptraceFolderPath);
-         std::filesystem::create_directories(mPtraceDirectory, ec);
-         if(ec)
-         {
-            std::cerr << "[Logger] Failed to create ptrace directory: " << ec.message() << std::endl;
-         }
-         else
-         {
-            set_directory_permissions(mPtraceDirectory);
          }
 
          // Performance: disable stream synchronization with C stdio
@@ -330,24 +309,6 @@ public:
       mDebugHeadersInitialized = true;
    }
 
-   /**
-    * @brief Initializes ptrace file headers that will be written at the start of each ptrace file.
-    *
-    * Call this once before writing any ptrace logs. The headers will be automatically
-    * written when the first ptrace file is created and after each file rotation.
-    *
-    * @param headers Vector of header lines to write at the start of each ptrace file.
-    */
-   void initialize_ptrace_headers(const std::vector<std::string>& headers)
-   {
-      std::lock_guard<std::mutex> lock(mPtraceHeadersMutex);
-      mPtraceHeaders = headers;
-      mPtraceHeadersInitialized = true;
-   }
-
-   /// @brief Full path of the current (latest) ptrace/.diag output file, or empty if none.
-   std::string get_current_ptrace_file() const { return mCurrentPtraceFilePath; }
-
 private:
    /// Private constructor - initializes member variables
    Logger()
@@ -355,8 +316,6 @@ private:
    , mMaxLines(KL::MAX_LOG_LINES)
    , mMaxBytes(0)
    , mCurrentFileSize(0)
-   , mPtraceLineCount(0)
-   , mPtraceFileSize(0)
    , mIsRunning(false)
    {
    }
@@ -386,12 +345,6 @@ private:
       {
          mFileStream.flush();
          mFileStream.close();
-      }
-
-      if(mPtraceStream.is_open())
-      {
-         mPtraceStream.flush();
-         mPtraceStream.close();
       }
    }
 
@@ -433,10 +386,6 @@ private:
       if(mFileStream.is_open())
       {
          mFileStream.flush();
-      }
-      if(mPtraceStream.is_open())
-      {
-         mPtraceStream.flush();
       }
    }
 
@@ -607,9 +556,6 @@ private:
                   write_to_file(fileBuffer);
                   write_to_console(lineBuffer, level);
                   break;
-               case KL::Sink::PtraceOnly:
-                  write_to_ptrace(entry.msg);
-                  break;
             }
 
             localQueue.pop();
@@ -640,67 +586,27 @@ private:
       // Critical applications may want to log this to stderr
    }
 
-   /// Writes a line to the current ptrace log file, creating a new one if necessary
-   void write_to_ptrace(const std::string& msg)
-   {
-      // Check if rotation is needed - rotate when ANY limit is exceeded
-      bool needsRotation = !mPtraceStream.is_open()
-         || (mMaxLines > 0 && mPtraceLineCount >= mMaxLines)
-         || (mMaxBytes > 0 && mPtraceFileSize >= mMaxBytes);
-
-      if(needsRotation)
-      {
-         create_new_ptrace_file();
-      }
-
-      if(mPtraceStream.is_open())
-      {
-         mPtraceStream << msg << '\n';
-         ++mPtraceLineCount;
-         mPtraceFileSize += msg.length() + 1; // +1 for newline
-      }
-      // If file still not open → silently drop (disk full, permission, etc.)
-   }
-
-
    void write_to_console(const std::string& lineBuffer, Level level)
    {
       // Lock internal console mutex for synchronization
       std::lock_guard<std::mutex> lock(m_consoleMutex);
 
       int offset = getConsoleLineOffset();
+      const bool useStderr = Level::Error == level || optionEnabled(LogOption::ConsoleToStderr);
+      std::ostream& stream = useStderr ? std::cerr : std::cout;
 
-      if(Level::Error == level)
-      {
-         if (offset > 0) {
-            // Print above spinners: insert line, move up, print, restore cursor
-            // Insert blank line to scroll content up without overwriting
-            std::cerr << "\033[s";                    // Save cursor position
-            std::cerr << "\033[" << offset << "A";    // Move up N lines
-            std::cerr << "\r";                        // Move to beginning of line
-            std::cerr << "\033[1L";                   // Insert 1 line (scroll up)
-            std::cerr << get_color_code(level) << lineBuffer << Color::RESET << "\033[K"; // Print and clear to end of line
-            std::cerr << "\033[u";                    // Restore cursor position
-            std::cerr.flush();                        // Explicit flush
-         } else {
-            std::cerr << get_color_code(level) << lineBuffer << Color::RESET << std::endl;
-         }
-      }
-      else
-      {
-         if (offset > 0) {
-            // Print above spinners: insert line, move up, print, restore cursor
-            // Insert blank line to scroll content up without overwriting
-            std::cout << "\033[s";                    // Save cursor position
-            std::cout << "\033[" << offset << "A";    // Move up N lines
-            std::cout << "\r";                        // Move to beginning of line
-            std::cout << "\033[1L";                   // Insert 1 line (scroll up)
-            std::cout << get_color_code(level) << lineBuffer << Color::RESET << "\033[K"; // Print and clear to end of line
-            std::cout << "\033[u";                    // Restore cursor position
-            std::cout.flush();                        // Explicit flush
-         } else {
-            std::cout << get_color_code(level) << lineBuffer << Color::RESET << std::endl;
-         }
+      if (offset > 0) {
+         // Print above spinners: insert line, move up, print, restore cursor
+         // Insert blank line to scroll content up without overwriting
+         stream << "\033[s";                    // Save cursor position
+         stream << "\033[" << offset << "A";    // Move up N lines
+         stream << "\r";                        // Move to beginning of line
+         stream << "\033[1L";                   // Insert 1 line (scroll up)
+         stream << get_color_code(level) << lineBuffer << Color::RESET << "\033[K"; // Print and clear to end of line
+         stream << "\033[u";                    // Restore cursor position
+         stream.flush();                        // Explicit flush
+      } else {
+         stream << get_color_code(level) << lineBuffer << Color::RESET << std::endl;
       }
    }
 
@@ -793,96 +699,6 @@ private:
       mCurrentFileSize = 0;
    }
 
-   /// Closes current ptrace file and opens a new one with timestamped name
-   void create_new_ptrace_file()
-   {
-      if(mPtraceStream.is_open())
-      {
-         mPtraceStream.flush();
-         mPtraceStream.close();
-      }
-
-      ++mPtraceFileSequence;
-      const auto now = std::chrono::system_clock::now();
-      const auto time_t_val = std::chrono::system_clock::to_time_t(now);
-      const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()) % 1000;
-
-      std::tm tm_val{};
-#if defined(_WIN32)
-      localtime_s(&tm_val, &time_t_val);
-#else
-      localtime_r(&time_t_val, &tm_val);
-#endif
-
-      // Get current process ID
-#ifdef _WIN32
-      DWORD pid = GetCurrentProcessId();
-#else
-      pid_t pid = getpid();
-#endif
-
-      char filename[128];
-
-      if(mPtraceFileSequence == 1)
-      {
-         std::snprintf(
-            filename,
-            sizeof(filename),
-            "qlc_%02d_%02d_%04d_%02d_%02d_%02d_%03d_%s_PID_%d_START_1.diag",
-            tm_val.tm_mday,
-            tm_val.tm_mon + 1,
-            tm_val.tm_year + 1900,
-            tm_val.tm_hour,
-            tm_val.tm_min,
-            tm_val.tm_sec,
-            static_cast<int>(ms.count()),
-            mAppVersion.c_str(),
-            static_cast<int>(pid)
-         );
-      } else
-      {
-         std::snprintf(
-            filename,
-            sizeof(filename),
-            "qlc_%02d_%02d_%04d_%02d_%02d_%02d_%03d_%s_PID_%d_%zu.diag",
-            tm_val.tm_mday,
-            tm_val.tm_mon + 1,
-            tm_val.tm_year + 1900,
-            tm_val.tm_hour,
-            tm_val.tm_min,
-            tm_val.tm_sec,
-            static_cast<int>(ms.count()),
-            mAppVersion.c_str(),
-            static_cast<int>(pid),
-            mPtraceFileSequence
-         );
-      }
-
-      const std::filesystem::path fullPath = mPtraceDirectory / filename;
-      mCurrentPtraceFilePath = fullPath.string();
-      mPtraceStream.open(fullPath, std::ios::out | std::ios::app);
-
-      if(!mPtraceStream.is_open())
-      {
-         std::cerr << "[Logger] CRITICAL: Failed to open ptrace file: " << fullPath << std::endl;
-      }
-      else
-      {
-         // Write headers if initialized
-         std::lock_guard<std::mutex> headerLock(mPtraceHeadersMutex);
-         if(mPtraceHeadersInitialized)
-         {
-            for(const auto& header : mPtraceHeaders)
-            {
-               mPtraceStream << header << '\n';
-            }
-         }
-      }
-
-      mPtraceLineCount = 0;
-      mPtraceFileSize = 0;
-   }
-
    // Member variables
    std::queue<LogEntry> mLogEntryQueue;
    std::condition_variable mCV;
@@ -901,23 +717,10 @@ private:
    size_t mCurrentFileSize{0};   // Current file size in bytes
    size_t mFileSequence{0};
 
-   // Ptrace log file tracking
-   std::string mCurrentPtraceFilePath;  // full path of the current (latest) ptrace/.diag file
-   std::ofstream mPtraceStream;
-   std::filesystem::path mPtraceDirectory;
-   size_t mPtraceLineCount{0};
-   size_t mPtraceFileSize{0};
-   size_t mPtraceFileSequence{0};
-
    // Debug file headers (written at start of each new debug log file)
    std::mutex mDebugHeadersMutex;
    bool mDebugHeadersInitialized{false};
    std::vector<std::string> mDebugHeaders;
-
-   // Ptrace file headers (written at start of each new ptrace file)
-   std::mutex mPtraceHeadersMutex;
-   bool mPtraceHeadersInitialized{false};
-   std::vector<std::string> mPtraceHeaders;
 
    // Common settings
    std::atomic<Level> m_minLevel{Level::Info};

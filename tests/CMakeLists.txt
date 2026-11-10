@@ -55,6 +55,11 @@ add_executable(test_binary_writer test_binary_writer.cpp)
 target_link_libraries(test_binary_writer PRIVATE test_objects ${PLATFORM_LIBS})
 add_test(NAME binary_writer_tests COMMAND test_binary_writer)
 
+# DIAG ptrace writer tests
+add_executable(test_ptrace_writer test_ptrace_writer.cpp)
+target_link_libraries(test_ptrace_writer PRIVATE test_objects ${PLATFORM_LIBS})
+add_test(NAME ptrace_writer_tests COMMAND test_ptrace_writer)
+
 # QLC metadata writer tests
 add_executable(test_qlc_writer test_qlc_writer.cpp)
 target_link_libraries(test_qlc_writer PRIVATE test_objects ${PLATFORM_LIBS})
@@ -69,3 +74,70 @@ add_test(NAME inflate_tests COMMAND test_inflate)
 add_executable(test_qsr4_writer test_qsr4_writer.cpp)
 target_link_libraries(test_qsr4_writer PRIVATE test_objects ${PLATFORM_LIBS})
 add_test(NAME qsr4_writer_tests COMMAND test_qsr4_writer)
+
+# C ABI smoke tests
+add_executable(test_qlc_c_api test_qlc_c_api.cpp)
+target_link_libraries(test_qlc_c_api PRIVATE test_objects ${PLATFORM_LIBS})
+add_test(NAME qlc_c_api_tests COMMAND test_qlc_c_api)
+
+# Compile and link a pure C consumer against the static wrapper.
+add_executable(test_qlc_c_header test_qlc_c_header.c)
+target_link_libraries(test_qlc_c_header PRIVATE test_objects ${PLATFORM_LIBS})
+add_test(NAME qlc_c_header_tests COMMAND test_qlc_c_header)
+
+# Verify the exported C ABI through the shared library target itself.
+add_executable(test_qlc_c_api_shared test_qlc_c_api_shared.c)
+target_link_libraries(test_qlc_c_api_shared PRIVATE DiagLoggerLibShared)
+set_target_properties(test_qlc_c_api_shared PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${DYNAMIC_LIBRARY_OUTPUT_DIRECTORY}
+)
+if(UNIX)
+    set_target_properties(test_qlc_c_api_shared PROPERTIES
+        BUILD_RPATH ${DYNAMIC_LIBRARY_OUTPUT_DIRECTORY}
+    )
+endif()
+add_test(NAME qlc_c_api_shared_tests COMMAND test_qlc_c_api_shared)
+
+# Optional live hardware diagnostic for the exported discovery ABI. This is
+# intentionally not part of the normal ctest suite because it requires a
+# connected Qualcomm device.
+add_executable(test_qlc_discovery_live test_qlc_discovery_live.cpp)
+target_link_libraries(test_qlc_discovery_live PRIVATE DiagLoggerLibShared)
+set_target_properties(test_qlc_discovery_live PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${DYNAMIC_LIBRARY_OUTPUT_DIRECTORY}
+)
+
+# Protocol lifecycle cancellation without attached hardware.
+add_executable(test_protocol_lifecycle test_protocol_lifecycle.cpp)
+target_link_libraries(test_protocol_lifecycle PRIVATE test_objects ${PLATFORM_LIBS})
+add_test(NAME protocol_lifecycle_tests COMMAND test_protocol_lifecycle)
+set_tests_properties(protocol_lifecycle_tests PROPERTIES TIMEOUT 30)
+
+# Exercise Windows QDS boundaries without attached hardware.
+if(WIN32)
+    add_executable(test_qcdevice_transport
+        test_qcdevice_transport.cpp
+        ${PROJECT_SOURCE_DIR}/src/transport/qcdevice_transport.cpp
+        ${PROJECT_SOURCE_DIR}/src/transport/transport.cpp
+    )
+    target_include_directories(test_qcdevice_transport PRIVATE
+        ${PROJECT_INCLUDE_DIRS}
+        ${QDS_INCLUDE_DIRS}
+    )
+    target_compile_definitions(test_qcdevice_transport PRIVATE QLC_STATIC QCDEVLIB_STATIC_LINK)
+    target_link_libraries(test_qcdevice_transport PRIVATE kLogger)
+    add_test(NAME qcdevice_transport_tests COMMAND test_qcdevice_transport)
+    set_tests_properties(qcdevice_transport_tests PROPERTIES TIMEOUT 15)
+
+    add_executable(test_transport_manager
+        test_transport_manager.cpp
+        ${PROJECT_SOURCE_DIR}/src/transport/transport_manager.cpp
+    )
+    target_include_directories(test_transport_manager PRIVATE
+        ${PROJECT_INCLUDE_DIRS}
+        ${QDS_INCLUDE_DIRS}
+    )
+    target_compile_definitions(test_transport_manager PRIVATE QLC_STATIC QCDEVLIB_STATIC_LINK)
+    target_link_libraries(test_transport_manager PRIVATE kLogger)
+    add_test(NAME transport_manager_tests COMMAND test_transport_manager)
+endif()

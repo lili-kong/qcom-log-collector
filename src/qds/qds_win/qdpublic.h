@@ -7,6 +7,7 @@
 #include <windows.h>
 #include <unordered_map>
 #include <string>
+#include <memory>
 #pragma once
 
 #include "../common/utils.h"
@@ -37,6 +38,8 @@
 #define QC_DEV_TYPE_TAC    0x08
 #define QC_DEV_TYPE_EPM    0x09
 #define QC_DEV_TYPE_LIBUSB 0x0A
+#define QC_DEV_TYPE_EUD    0x0B
+#define QC_DEV_TYPE_SAHARA 0x0C
 
 #define QC_DEV_STATE_DEPARTURE 0x00
 #define QC_DEV_STATE_ARRIVAL   0x01
@@ -63,6 +66,18 @@
 #define DEV_CLASS_MDM      0x00000008
 #define DEV_CLASS_ADB      0x00000010
 #define DEV_CLASS_LIBUSB   0x00000020
+#define DEV_CLASS_SAHARA   0x00000040
+
+// Bitmask flags for DEV_FEATURE_SETTING.DeviceProtocol.
+// OR these together to select which sub-protocols within DEV_CLASS_SAHARA
+// should be reported.  DeviceProtocol = 0 means accept all protocols that
+// belong to the subscribed DeviceClass.
+#define DEV_PROTOCOL_MASK_SAHARA         0x00000001 /**< DEV_PROTOCOL_SAHARA (0x10)                       */
+#define DEV_PROTOCOL_MASK_EDL            0x00000002 /**< DEV_PROTOCOL_SAHARA_PBL_EMERGENCY_DOWNLOAD (0x11) */
+#define DEV_PROTOCOL_MASK_FLASHLESS_BOOT 0x00000004 /**< DEV_PROTOCOL_SAHARA_PBL_FLASHLESS_BOOT (0x12)    */
+#define DEV_PROTOCOL_MASK_RAMDUMP        0x00000008 /**< DEV_PROTOCOL_SAHARA_SBL_XBL_RAMDUMP (0x13)       */
+#define DEV_PROTOCOL_MASK_EFS            0x00000010 /**< DEV_PROTOCOL_SAHARA_TN_APPS_Remote_EFS (0x14)    */
+#define DEV_PROTOCOL_MASK_FIREHOSE       0x00000020 /**< DEV_PROTOCOL_FIREHOSE (0x20)                     */
 
 // USB Protocol Number Assignment
 #define DEV_PROTOCOL_UNKNOWN                       0x00
@@ -85,12 +100,13 @@
 #define DEV_DEFAULT_BAUD_RATE                      38400
 
 #pragma pack(push, 4)
-
+using DevDetailsMap = std::unordered_map<std::string, std::string>;
 typedef struct _DEV_FEATURE_SETTING
 {
-   ULONG Version;       // 1
-   ULONG Settings;      // OR'ed feature masks
-   ULONG DeviceClass;   // 0 - all classes
+   ULONG Version;          // 1
+   ULONG Settings;         // OR'ed feature masks
+   ULONG DeviceClass;      // 0 - all classes; OR'ed DEV_CLASS_* bits
+   ULONG DeviceProtocol;   // 0 - all protocols in class; OR'ed DEV_PROTOCOL_MASK_* bits (Sahara sub-protocol filter)
    PTSTR VID;
 } DEV_FEATURE_SETTING, *PDEV_FEATURE_SETTING;
 
@@ -110,7 +126,7 @@ typedef struct _CB_PARAMS
    PWCHAR HwId;      // device hardware ID
    PWCHAR ParentDev; // name of parent device if present
    PWCHAR ParentLocationInfomation; // physical location of parent device if present
-   std::unordered_map<std::string, std::string>* DevDetails; // pointer-based: contains fields obtained from parsed device description string
+   std::unique_ptr<DevDetailsMap> DevDetails; /* Using unique ptr to avoid calling the destructor */
 } CB_PARAMS, *PCB_PARAMS;
 
 typedef enum _DEV_INFO_ERRNO
@@ -145,7 +161,7 @@ typedef struct _DEV_PARAMS_N
    ULONG  Mtu;             // MTU for network connection (data call)
    ULONG  Flag;            // flag to indicate device type, state, and availability of QC driver support
    ULONG  Protocol;        // protocol code of the USB function, 0 means unknown protocol
-   std::unordered_map<std::string, std::string>* devDetails; // pointer-based: contains fields obtained from parsed device description string
+   std::unique_ptr<DevDetailsMap> DevDetails; /* Using unique ptr to avoid calling the destructor */
 } DEV_PARAMS_N, *PDEV_PARAMS_N;
 
 #pragma pack(pop)
@@ -162,8 +178,11 @@ namespace QcDevice
    QCDEVLIB_API VOID SetDeviceChangeCallback(DEVICECHANGE_CALLBACK Cb, PVOID AppContext);
    QCDEVLIB_API VOID SetDeviceChangeCallback(DEVICECHANGE_CALLBACK_N Cb);
    QCDEVLIB_API VOID SetFeature(PVOID Features);
+   QCDEVLIB_API BOOL initializeEudTrace(VOID);
    QCDEVLIB_API VOID StartDeviceMonitor(VOID);
    QCDEVLIB_API VOID StopDeviceMonitor(VOID);
+   QCDEVLIB_API BOOL startAmbientMode(VOID);
+   QCDEVLIB_API BOOL stopAmbientMode(VOID);
    QCDEVLIB_API ULONG GetDevice(PVOID UserBuffer);
    QCDEVLIB_API PCHAR GetPortName(PVOID DeviveName);
    QCDEVLIB_API VOID GetDriverVersion(VOID);

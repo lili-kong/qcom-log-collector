@@ -18,9 +18,8 @@ bool DeviceDiscovery::is_monitor_running() const {
     return TransportManager::instance().is_monitor_running();
 }
 
-std::vector<DeviceInfo> DeviceDiscovery::enumerate_composite_devices(
-    const std::vector<ProtocolType>& filter) {
-    return TransportManager::instance().enumerate_composite_devices(filter);
+std::vector<DeviceInfo> DeviceDiscovery::get_device_list() {
+    return TransportManager::instance().enumerate_composite_devices();
 }
 
 DeviceDiscovery::ListenerToken DeviceDiscovery::set_protocol_added_listener(

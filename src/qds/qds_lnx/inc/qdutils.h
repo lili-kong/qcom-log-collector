@@ -70,24 +70,19 @@ extern int log_level;
 /**
  * @brief   To print the log messages
  *
- * @param   lvl     Log level
- * @param   file    File name
- * @param   func    Function name
- * @param   fmt     Format
+ * @param   Level   Log level
+ * @param   ver_num Library version string (may be empty)
+ * @param   func    Function name (__FUNCTION__)
+ * @param   line    Line number   (__LINE__)
+ * @param   fmt     Format string
  *
  * @returns         Nothing
  */
-//void libqcdev_log(int lvl, char *ver_num, char *file, int line, const char *func, char *fmt,...);
-
-/**
- * To set log levels
-*/
-static inline void QCDEV_Log(QLogLevel Level,
-                                     const char* ver_num,
-                                     const char* file,
-                                     int         line,
-                                     const char* func,
-                                     const char* fmt, ...)
+static inline void QCDEV_Log(QLogLevel   Level,
+                              const char* ver_num,
+                              const char* func,
+                              int         line,
+                              const char* fmt, ...)
 {
     char msgBuf[1024];
     va_list args;
@@ -97,11 +92,11 @@ static inline void QCDEV_Log(QLogLevel Level,
 
     char fullBuf[2048];
     if (ver_num && ver_num[0] != '\0')
-        snprintf(fullBuf, sizeof(fullBuf), "[v%s][%s:%d][%s] %s",
-                 ver_num, file, line, func, msgBuf);
+        snprintf(fullBuf, sizeof(fullBuf), "[v%s][%s:%d] %s",
+                 ver_num, func, line, msgBuf);
     else
-        snprintf(fullBuf, sizeof(fullBuf), "[%s:%d][%s] %s",
-                 file, line, func, msgBuf);
+        snprintf(fullBuf, sizeof(fullBuf), "[%s:%d] %s",
+                 func, line, msgBuf);
 
     QCD_Printf(Level, "%s", fullBuf);
 }
@@ -110,44 +105,43 @@ static inline void QCDEV_Log(QLogLevel Level,
  * To log data messages
  */
 #define QCDEV_LOG_DATA(args...) \
-    QCDEV_Log(Data,      "", __FILE__, __LINE__, __FUNCTION__, ##args)
+    QCDEV_Log(Data,      "", __FUNCTION__, __LINE__, ##args)
 
 /**
  * To log debug messages
  */
 #define QCDEV_LOG_DBG(args...) \
-    QCDEV_Log(Debug,     "", __FILE__, __LINE__, __FUNCTION__, ##args)
+    QCDEV_Log(Debug,     "", __FUNCTION__, __LINE__, ##args)
 
 /**
  * To log info messages
  */
 #define QCDEV_LOG_INFO(args...) \
-    QCDEV_Log(Info,      "", __FILE__, __LINE__, __FUNCTION__, ##args)
+    QCDEV_Log(Info,      "", __FUNCTION__, __LINE__, ##args)
 
 /**
  * To log warning messages
  */
 #define QCDEV_LOG_WARN(args...) \
-    QCDEV_Log(Warning,   "", __FILE__, __LINE__, __FUNCTION__, ##args)
+    QCDEV_Log(Warning,   "", __FUNCTION__, __LINE__, ##args)
 
 /**
  * To log error messages — includes library version number
  */
 #define QCDEV_LOG_ERR(args...) \
-    QCDEV_Log(Error, DEV_DIS_LIB_VERSION, \
-              __FILE__, __LINE__, __FUNCTION__, ##args)
+    QCDEV_Log(Error, DEV_DIS_LIB_VERSION, __FUNCTION__, __LINE__, ##args)
 
 /**
  * To log exception messages
  */
 #define QCDEV_LOG_EXCEPTION(args...) \
-    QCDEV_Log(Exception, "", __FILE__, __LINE__, __FUNCTION__, ##args)
+    QCDEV_Log(Exception, "", __FUNCTION__, __LINE__, ##args)
 
 /**
  * To log fatal error messages
  */
 #define QCDEV_LOG_FATAL(args...) \
-    QCDEV_Log(Fatal,     "", __FILE__, __LINE__, __FUNCTION__, ##args)
+    QCDEV_Log(Fatal,     "", __FUNCTION__, __LINE__, ##args)
 
 
 #else

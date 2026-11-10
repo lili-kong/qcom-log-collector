@@ -73,6 +73,9 @@ void Protocol::set_state(ProtocolState state) {
 }
 
 bool Protocol::lifecycle_open() {
+    if (open_cancelled()) {
+        return false;
+    }
     set_state(STATE_INITIALIZING);
     if (port_trace_enabled_) {
         // Fill description into the metadata if the subclass didn't.
@@ -86,9 +89,13 @@ bool Protocol::lifecycle_open() {
         }
         CFLOG_INFO("Port trace enabled: " + port_trace_path_, true);
     }
-    if (!transport_->open()) {
+    if (!transport_->open(open_cancel_requested_)) {
         if (port_trace_enabled_) ptrace_.close();
         set_state(STATE_DISCONNECTED);
+        return false;
+    }
+    if (open_cancelled()) {
+        lifecycle_close();
         return false;
     }
     start_io_threads();
@@ -99,12 +106,13 @@ bool Protocol::lifecycle_open() {
 }
 
 void Protocol::lifecycle_close() {
-    set_state(STATE_DISCONNECTED);
-    stop_io_threads();
+    // Close before joining: closing is what unblocks a pending transport_->read().
     transport_->close();
+    stop_io_threads();
     if (port_trace_enabled_) {
         ptrace_.close();
     }
+    set_state(STATE_DISCONNECTED);
 }
 
 void Protocol::start_io_threads() {
@@ -151,7 +159,7 @@ void Protocol::stop_io_threads() {
 }
 
 bool Protocol::submit_tx(ByteBuffer data) {
-    if (!io_running_.load()) {
+    if (!io_running_.load() || open_cancelled()) {
         return false;
     }
     {
@@ -184,7 +192,7 @@ void Protocol::tx_loop() {
         }
 
         // Re-check after the wait: the port may have gone away meanwhile.
-        if (!is_open() || !is_connected()) {
+        if (!is_open() || !is_connected() || open_cancelled()) {
             break;
         }
         if (!data.empty()) {
@@ -245,14 +253,22 @@ void Protocol::rx_loop() {
 
 void Protocol::request_open() {
     ensure_lifecycle_worker();
-    desired_open_.store(true);
+    {
+        std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+        desired_open_.store(true);
+    }
     lifecycle_cv_.notify_all();
 }
 
 void Protocol::request_close() {
     ensure_lifecycle_worker();
-    desired_open_.store(false);
+    {
+        std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+        desired_open_.store(false);
+        open_cancel_requested_.store(true);
+    }
     lifecycle_cv_.notify_all();
+    ready_cv_.notify_all();
 }
 
 void Protocol::ensure_lifecycle_worker() {
@@ -264,47 +280,65 @@ void Protocol::ensure_lifecycle_worker() {
 }
 
 void Protocol::lifecycle_loop() {
+    std::unique_lock<std::mutex> lock(lifecycle_mutex_);
     while (true) {
-        {
-            std::unique_lock<std::mutex> lock(lifecycle_mutex_);
-            lifecycle_cv_.wait(lock, [this] {
-                return desired_open_.load() != is_open() || !lifecycle_running_.load();
-            });
-            if (!lifecycle_running_.load()) return;
+        lifecycle_cv_.wait(lock, [this] {
+            return desired_open_.load() != is_open() || !lifecycle_running_.load() ||
+                   (is_open() && open_cancelled());
+        });
+        if (!lifecycle_running_.load()) {
+            return;
         }
 
-        // Reconcile actual state toward desired. The check is outside the
-        // lock so lifecycle_open/close (which may take a while) don't
-        // block request_open/close callers.
-        bool want = desired_open_.load();
-        if (want && !is_open()) {
-            if (lifecycle_open()) {
-                std::lock_guard<std::mutex> lock(lifecycle_mutex_);
-                ready_cv_.notify_all();
-            }
-        } else if (!want && is_open()) {
-            lifecycle_close();
-            std::lock_guard<std::mutex> lock(lifecycle_mutex_);
-            ready_cv_.notify_all();
+        const bool opening = desired_open_.load() && !is_open();
+        lifecycle_busy_ = true;
+        if (opening) {
+            open_cancel_requested_.store(false);
         }
+        // Slow hooks and state callbacks must not hold the request mutex.
+        lock.unlock();
+        if (opening) {
+            lifecycle_open();
+        } else {
+            lifecycle_close();
+        }
+        lock.lock();
+        if (opening && open_cancelled()) {
+            // A later request_open() must not rescue the cancelled attempt.
+            lock.unlock();
+            lifecycle_close();
+            lock.lock();
+        }
+        lifecycle_busy_ = false;
+        ready_cv_.notify_all();
     }
 }
 
 bool Protocol::wait_ready(std::chrono::milliseconds timeout) {
     std::unique_lock<std::mutex> lock(lifecycle_mutex_);
-    ready_cv_.wait_for(lock, timeout, [this] { return is_open(); });
-    return is_open();
+    return ready_cv_.wait_for(
+        lock, timeout, [this] { return !open_cancelled() && desired_open_.load() && is_open(); });
 }
 
 bool Protocol::wait_closed(std::chrono::milliseconds timeout) {
     std::unique_lock<std::mutex> lock(lifecycle_mutex_);
-    ready_cv_.wait_for(lock, timeout, [this] { return !is_open(); });
-    return !is_open();
+    return ready_cv_.wait_for(
+        lock, timeout, [this] { return !lifecycle_busy_ && !desired_open_.load() && !is_open(); });
+}
+
+bool Protocol::wait_for_open_cancel(std::chrono::milliseconds timeout) {
+    std::unique_lock<std::mutex> lock(lifecycle_mutex_);
+    return lifecycle_cv_.wait_for(lock, timeout, [this] { return open_cancelled(); });
 }
 
 void Protocol::stop_lifecycle_worker() {
     if (!lifecycle_running_.load() && !lifecycle_thread_.joinable()) return;
-    lifecycle_running_.store(false);
+    {
+        std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+        desired_open_.store(false);
+        open_cancel_requested_.store(true);
+        lifecycle_running_.store(false);
+    }
     lifecycle_cv_.notify_all();
     ready_cv_.notify_all();
     if (lifecycle_thread_.joinable()) {
@@ -326,6 +360,9 @@ ByteBuffer Protocol::send_and_wait_frame(ByteBuffer frame,
                                          std::chrono::milliseconds timeout) {
     // Only one request may be outstanding against the single pending_ slot.
     std::lock_guard<std::mutex> send_lock(send_mutex_);
+    if (open_cancelled()) {
+        return {};
+    }
 
     std::promise<ByteBuffer> resp_promise;
     std::future<ByteBuffer> resp_future = resp_promise.get_future();
@@ -343,7 +380,7 @@ ByteBuffer Protocol::send_and_wait_frame(ByteBuffer frame,
     }
 
     const auto deadline = std::chrono::steady_clock::now() + timeout;
-    while (io_running_.load()) {
+    while (io_running_.load() && !open_cancelled()) {
         if (resp_future.wait_for(std::chrono::milliseconds(10)) == std::future_status::ready) {
             std::lock_guard<std::mutex> lock(pending_mutex_);
             pending_.promise = nullptr;

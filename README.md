@@ -141,6 +141,12 @@ Qualcomm Log Collector (QLC) is a tool for collecting diagnostic logs from Qualc
 └── Build/                  # Build output directory
 ```
 
+## C API
+
+QLC provides a C-compatible shared-library API for external consumers and
+language bindings. See [doc/C_API.md](doc/C_API.md) for the ABI, lifecycle,
+linking, and buffer-ownership rules.
+
 ## Troubleshooting
 
 ### Common Issues

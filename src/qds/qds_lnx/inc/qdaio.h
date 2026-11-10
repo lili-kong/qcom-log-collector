@@ -107,7 +107,9 @@ typedef VOID (_stdcall *AIO_CALLBACK)(LONG AppHdl, PVOID *Context, ULONG Status,
 typedef struct _AIO_CONTEXT
 {
     AIO_CALLBACK Callback;      /**< Callback to be triggered   */
-    PVOID        UserData;      /**< Userdata                   */
+    PVOID        UserData;      /**< External user data; NOT owned by this struct */
+
+    _AIO_CONTEXT() : Callback(nullptr), UserData(nullptr) {}
 } AIO_CONTEXT, *PAIO_CONTEXT;
 
 /**

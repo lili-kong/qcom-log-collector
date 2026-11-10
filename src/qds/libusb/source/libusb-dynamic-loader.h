@@ -78,6 +78,11 @@ typedef int (*libusb_hotplug_register_callback_t)(
         libusb_hotplug_callback_handle* callback_handle
         );
 
+typedef void (*libusb_hotplug_deregister_callback_t)(
+        libusb_context* ctx,
+        libusb_hotplug_callback_handle callback_handle
+        );
+
 typedef const char* (*libusb_error_name_t)(int errcode);
 typedef const char* (*libusb_strerror_t)(enum libusb_error errcode);
 
@@ -118,6 +123,12 @@ typedef int (*libusb_get_port_numbers_t)(
     int port_numbers_len
 );
 
+typedef int (*libusb_handle_events_timeout_completed_t)(
+    libusb_context* ctx,
+    struct timeval*  tv,
+    int*             completed
+);
+
 extern libusb_init_t                 fn_libusb_init;
 extern libusb_exit_t                 fn_libusb_exit;
 extern libusb_open_t                 fn_libusb_open;
@@ -137,6 +148,7 @@ extern libusb_ref_device_t           fn_libusb_ref_device;
 extern libusb_has_capability_t       fn_libusb_has_capability;
 extern libusb_hotplug_register_callback_t
 fn_libusb_hotplug_register_callback;
+extern libusb_hotplug_deregister_callback_t fn_libusb_hotplug_deregister_callback;
 extern libusb_error_name_t           fn_libusb_error_name;
 extern libusb_strerror_t             fn_libusb_strerror;
 extern libusb_free_config_descriptor_t
@@ -147,7 +159,8 @@ extern libusb_detach_kernel_driver_t fn_libusb_detach_kernel_driver;
 extern libusb_claim_interface_t      fn_libusb_claim_interface;
 extern libusb_release_interface_t    fn_libusb_release_interface;
 extern libusb_clear_halt_t           fn_libusb_clear_halt;
-extern libusb_get_port_numbers_t     fn_libusb_get_port_numbers;
+extern libusb_get_port_numbers_t                    fn_libusb_get_port_numbers;
+extern libusb_handle_events_timeout_completed_t     fn_libusb_handle_events_timeout_completed;
 
 bool load_libusb();
 void unload_libusb();

@@ -13,13 +13,14 @@ namespace QC {
 
 namespace {
 
-// Configure this module's kLogger instance from the caller's config.
+// Configure this module's kLogger instance for internal diagnostics. The DIAG
+// port trace is written by PtraceWriter directly to the caller's output path.
 //
 // kLogger is header-only and its singleton lives in a function-local static, so
 // each module owns one: the consumer (e.g. qlc.exe) configures its own for its
 // user-facing messages, and this one backs everything the engine writes —
-// including the ptrace/.diag capture via PtraceWriter. Without this the engine
-// would fall back to the default PTRACE_DIR and silently ignore output_path.
+// The first init wins, so keep this process-global logger independent of the
+// per-capture output path.
 //
 // init() is std::call_once-guarded internally, so constructing several
 // DiagLoggers is harmless: the first one's paths win. Shutdown is left to
@@ -28,14 +29,24 @@ namespace {
 void configure_library_logging(const DiagLoggerConfig& config) {
     auto& logger = KL::Logger::get_instance();
 
-    const std::string ptrace_dir =
-        config.output_path.empty() ? std::string(PTRACE_DIR) : config.output_path;
-    logger.init(LOG_DIR, ptrace_dir, 0, KL::MAX_LOG_FILE_SIZE);
-
+#ifdef QLC_DLL_EXPORTS
+    // MCP uses stdout for its JSON-RPC stdio transport. Keep diagnostics
+    // visible to the host on stderr, but never let the DLL write protocol noise
+    // to stdout. The static CLI retains its normal console behavior.
+    auto options = KL::LogOption::ConsoleToStderr;
+    if (config.verbose) {
+        logger.setLevel(KL::Level::Debug);
+        options |= KL::LogOption::DebugToFile;
+    }
+    logger.setOptions(options);
+#else
     if (config.verbose) {
         logger.setLevel(KL::Level::Debug);
         logger.setOptions(KL::LogOption::DebugToFile);
     }
+#endif
+
+    logger.init(LOG_DIR, 0, KL::MAX_LOG_FILE_SIZE);
 }
 
 } // namespace

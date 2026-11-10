@@ -37,7 +37,7 @@ public:
     // async lifecycle helpers (request_open/close, wait_ready) live on
     // Protocol. is_open/is_connected/is_disconnected are provided by
     // Transport based on state_ transitions this class performs.
-    bool open() override;
+    bool open(const std::atomic<bool>& cancel_requested) override;
     void close() override;
     size_t write(const uint8_t* data, size_t len) override;
     size_t read(uint8_t* buf, size_t max_len, uint32_t timeout_ms) override;

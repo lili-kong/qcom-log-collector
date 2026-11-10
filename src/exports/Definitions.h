@@ -2,33 +2,23 @@
 // SPDX-License-Identifier: BSD 3-Clause Clear License
 //
 // Public device/protocol data structures shared across QLC's transport
-// layer, protocol layer and CLI.
+// layer, protocol layer and CLI. Struct shape mirrors QDC's Definitions.h
+// (see qualcomm-device-configurator/src/exports/Definitions.h) with QLC
+// naming conventions applied.
 
 #ifndef QC_EXPORTS_DEFINITIONS_H
 #define QC_EXPORTS_DEFINITIONS_H
+
+#include "qlc_export.h"
 
 #include <cstdint>
 #include <list>
 #include <string>
 #include <vector>
 
-// DLL export/import macro for the qlc public API (src/exports/). Building
-// the shared DiagLoggerLib target defines QLC_DLL_EXPORTS; consumers
-// linking against the import library get dllimport. QLC_STATIC opts out
-// entirely for a statically-linked build of the same sources.
-#if defined(_WIN32) && !defined(QLC_STATIC)
-#ifdef QLC_DLL_EXPORTS
-#define QLC_API __declspec(dllexport)
-#else
-#define QLC_API __declspec(dllimport)
-#endif
-#else
-#define QLC_API
-#endif
-
 namespace QC {
 
-/// Protocol type classification.
+/// Protocol type classification (mirrors QUTS ProtocolType enum).
 enum ProtocolType {
     PROT_UNKNOWN = -1,
     PROT_SAHARA,
@@ -101,18 +91,6 @@ struct ProtocolInfo {
     uint32_t       local_port;          // Not surfaced by QDS; reserved
     uint32_t       remote_port;         // Not surfaced by QDS; reserved
     std::string    alternate_description; // Not surfaced by QDS; reserved
-
-    // QLC-internal fields sourced from QDS; used for device grouping and CLI display.
-    std::string  com_port;          // Extracted COM port (e.g. "COM3"), empty if N/A
-    std::string  parent_device;     // Parent composite device description
-    std::string  parent_location;   // Parent physical location on bus
-    std::string  adb_serial_number; // ADB serial number from QcDevice
-    std::string  msm_serial_number; // MSM serial number from QcDevice
-    std::string  vid;               // USB vendor ID, parsed from HwId (e.g. "05C6")
-    std::string  pid;               // USB product ID, parsed from HwId
-    std::string  edl_chip_id;       // EDL chip ID, parsed from HwId's CID_ segment
-    std::string  soc_version;       // SoC version string from QcDevice
-    uint32_t     flags;             // Device flags (type, state, bus, QC driver)
 };
 
 /// A composite device with its child protocols.
@@ -133,7 +111,7 @@ struct DeviceInfo {
 };
 
 /// Calling convention for callbacks handed to QLC. __stdcall on Windows to
-/// match standard host calling conventions; no-op on other platforms.
+/// match QIL/QUTS host expectations; no-op on other platforms.
 #if defined(_WIN32)
 #define QC_CALLBACK __stdcall
 #else

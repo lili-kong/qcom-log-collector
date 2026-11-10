@@ -26,7 +26,7 @@ enum interface_protocols {
 
 #include "libusb-dynamic-loader.h"
 
-#if (defined(__GNUC__) && defined(__unix__))
+#if (defined(__GNUC__) && (defined(__unix__) || defined(__APPLE__)))
 #include <sys/stat.h>
 #define ERROR_INVALID_PARAMETER       EINVAL
 #define QCOM_MAX_STRING_SIZE			256
@@ -35,6 +35,10 @@ enum interface_protocols {
 #define QCOM_DPL_DEV_NAME			"QCOM_LIBUSB_DPL_Data"
 #define QCOM_QDSS_DEV_NAME			"QCOM_LIBUSB_QDSS_Data"
 #define QCOM_EDL_DEV_NAME			"QCOM_LIBUSB_QDLoader"
+#define QCOM_ADB_DEV_NAME			"ADB Interface"
+#define QCDEV_INTERFACE_CLASS_ADB		0xFF
+#define QCDEV_INTERFACE_SUBCLASS_ADB		0x42
+#define QCDEV_INTERFACE_PROTOCOL_ADB		0x01
 #endif
 
 //#ifdef __cplusplus
@@ -52,6 +56,7 @@ enum interface_protocols {
 #include <cstdio>
 #include <strsafe.h>
 #include <vector>
+#include <memory>
 //#include <shlwapi.h>
  #define QC_REG_SW_KEY_LIBUSB "SYSTEM\\CurrentControlSet\\Control\\Class\\{eb781aaf-9c70-4523-a5df-642a87eca567}"
  #define QC_SPEC_SERNUM      "QCDeviceSerialNumber"
@@ -62,7 +67,7 @@ enum interface_protocols {
  #define QC_REG_SW_KEY_USER   "Software\\Qualcomm\\QDS\\USB\\"
 #endif
 
-#ifdef QCOM_LNX_ENV
+#if defined(QCOM_LNX_ENV) || defined(__APPLE__)
 #include <stdio.h>
 #include <stdlib.h>
 #include <fcntl.h>
@@ -77,9 +82,8 @@ enum interface_protocols {
 #ifdef QCOM_WIN_ENV
 //#include "../../qds_win/scandev.h"
 #endif
-#ifdef QCOM_LNX_ENV
+#if defined(QCOM_LNX_ENV) || defined(__APPLE__)
 #include "../../qds_lnx/inc/windows_compatible.h"
-#define LIBUSB_CONFIG_FILE "/etc/qcom_libusb.conf"
 #endif
 
 #define QCOM_VENDOR_ID              0x05c6 // device's Vendor ID
@@ -87,16 +91,19 @@ enum interface_protocols {
 using namespace std;
 struct _QcdevCtx;
 
+#include <atomic>
 #include <mutex>
 #include <condition_variable>
 
+using DevDetailsMap = std::unordered_map<std::string, std::string>;
 typedef struct qcom_libusb_device
 {
     struct libusb_device_handle*    dev_handle; //single dev handle per device
     struct libusb_device*           dev;
     BOOL                            num_devices;
-    INT                             ref_count;
+    atomic<int>                     ref_count;
     atomic<int>                     active_transfer;
+    atomic<bool>                    disconnect_event{false};
     mutex                           dev_handle_mutex; /* Per-device synchronization primitives */
     condition_variable              active_transfer_cv;
     CHAR                            SerNumMSM[QCOM_MAX_STRING_SIZE];
@@ -127,12 +134,15 @@ typedef struct device_info
     uint8_t                         bulk_out_endpointAddr;
     UINT                            bulk_in_size;
     UINT                            bulk_out_size;
-    std::unordered_map<std::string, std::string>* DevDetailsMP; // pointer-based: contains fields obtained from parsed device description string
+    std::unique_ptr<std::unordered_map<std::string, std::string>> DevDetailsMP; // pointer-based: contains fields obtained from parsed device description string
     PQcomLibUSBdevCtx               devCtx;
+    device_info();
+    device_info(const device_info& other);
 }QcomDeviceInfo, * PQcomDeviceInfo;
 
 BOOL initialize_libusb();
 VOID deinitialize_libusb();
+struct libusb_context* get_libusb_context();
 BOOL enumerate_devices();
 BOOL process_device(libusb_device* dev, void *QcdevCtx);
 int qcom_libusb_open_internal(QcomDeviceInfo* qcomDevInfo, void** devHandle);
@@ -149,16 +159,24 @@ BOOLEAN set_dev_details_in_registry(LPCSTR SW_KEY_PATH, const char* DevDetails);
 PQcomDeviceInfo find_device(PQcomLibUSBdevCtx devContext, const char* SernumMsm, const char* devDesc);
 #endif
 
-#ifdef QCOM_LNX_ENV
+#if defined(QCOM_LNX_ENV) || defined(__APPLE__)
 VOID register_libusb_hotplug_callback(void *device_ctx);
+VOID unregister_libusb_hotplug_callback(void);
 BOOL libusb_device_change_callback(libusb_context *ctx,
                                   libusb_device *dev,
                                   libusb_hotplug_event event,
                                   void *user_data);
 void PushLibUSBToApplication(PQcomDeviceInfo devinfo);
 std::unordered_map<std::string, std::string> ParseDevDesc(const char* input, std::unordered_map<std::string, std::string>& deviceMap);
+#ifndef __APPLE__
 BOOL IsQcomLibusbEnable();
+#endif
 PQcomDeviceInfo find_device(PQcomLibUSBdevCtx devContext, const char* devDesc);
+
+#if defined(QCOM_LNX_ENV) || defined(__APPLE__)
+void start_arrival_worker(void);
+void stop_arrival_worker(void);
+#endif
 #endif
 
 namespace QcomLibusbDevice {

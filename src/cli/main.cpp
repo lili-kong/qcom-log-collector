@@ -221,7 +221,7 @@ static bool wait_protocols_ready(std::chrono::milliseconds wait_time) {
             break;
         }
         if (g_discovery) {
-            initialize_protocol_readiness(g_discovery->enumerate_composite_devices());
+            initialize_protocol_readiness(g_discovery->get_device_list());
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
@@ -369,14 +369,11 @@ int main(int argc, char* argv[]) {
     // the engine's own output (including the ptrace capture); DiagLogger
     // configures that one itself from DiagLoggerConfig::output_path.
     try {
-        KL::Logger::get_instance().init(LOG_DIR, opts.output_path, 0, KL::MAX_LOG_FILE_SIZE);
-        std::string log_level = "INFO";
+        KL::Logger::get_instance().init(LOG_DIR, 0, KL::MAX_LOG_FILE_SIZE);
         if(opts.verbose) {
             KL::Logger::get_instance().setLevel(KL::Level::Debug);
             KL::Logger::get_instance().setOptions(KL::LogOption::DebugToFile);
-            log_level = "DEBUG";
         }
-        CFLOG_INFO("kLogger initialized successfully. PTRACE_DIR:" + opts.output_path + ", Log Level:" + log_level, true);
     } catch (const std::exception& e) {
         CFLOG_ERROR(std::string("Exception initializing kLogger: ") + e.what(), true);
     }
@@ -402,7 +399,7 @@ int main(int argc, char* argv[]) {
 
     if (opts.command == QC::CommandType::LIST_DEVICES) {
         CFLOG_INFO("Scanning for QcDevice devices...", true);
-        auto composites = discovery.enumerate_composite_devices();
+        auto composites = discovery.get_device_list();
         if (composites.empty()) {
             CFLOG_WARNING("No QcDevice devices found.", true);
             unsubscribe_device_listeners();
@@ -447,7 +444,7 @@ int main(int argc, char* argv[]) {
     // Resolve --device: match the given value against composite device descriptions,
     // ADB serial numbers, or MSM serial numbers, then auto-select the DIAG protocol.
     if (opts.has_port && !opts.device_name.empty()) {
-        auto composites = discovery.enumerate_composite_devices();
+        auto composites = discovery.get_device_list();
         const QC::DeviceInfo* matched_dev = nullptr;
         for (const auto& dev : composites) {
             if (dev.description == opts.device_name
@@ -523,7 +520,7 @@ int main(int argc, char* argv[]) {
     g_adpl_port_name = config.enable_adpl ? config.adpl_port_name : std::string();
     g_qdss_required.store(config.enable_qdss);
     g_adpl_required.store(config.enable_adpl);
-    initialize_protocol_readiness(discovery.enumerate_composite_devices());
+    initialize_protocol_readiness(discovery.get_device_list());
     g_discovery = &discovery;
 
     std::signal(SIGINT, signal_handler);

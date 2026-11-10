@@ -64,15 +64,14 @@ public:
     /// Set desired state to OPEN. Idempotent (equivalent stores collapse).
     void request_open();
 
-    /// Set desired state to CLOSED. Idempotent.
+    /// Set desired state to CLOSED and cancel an ongoing open. Idempotent.
     void request_close();
 
-    /// Block until is_open() becomes true, or timeout elapses. Returns
-    /// true if the protocol is open on return.
+    /// Wait until the port is open and not being cancelled, or timeout.
+    /// Protocol handshaking may still be in progress.
     bool wait_ready(std::chrono::milliseconds timeout);
 
-    /// Block until is_open() becomes false, or timeout elapses. Returns
-    /// true if the protocol is closed on return.
+    /// Wait until the port is closed and any opening/closing work has finished.
     bool wait_closed(std::chrono::milliseconds timeout);
 
     /// Port state, forwarded from the owned transport. Safe before open()
@@ -218,6 +217,12 @@ protected:
     virtual bool lifecycle_open();
     virtual void lifecycle_close();
 
+    /// Cancellation stays set until the worker begins a fresh opening attempt.
+    bool open_cancelled() const { return open_cancel_requested_.load(); }
+
+    /// Interrupt a handshake delay when request_close() arrives.
+    bool wait_for_open_cancel(std::chrono::milliseconds timeout);
+
     /// Optional consumer loops started alongside the TX/RX pumps. The
     /// receiver_loop() typically pulls raw bytes with next_rx() and does
     /// framing; the dispatcher_loop() typically routes decoded frames.
@@ -317,10 +322,13 @@ private:
     std::atomic<bool> lifecycle_running_{false};
 
     // Desired state driven by request_open()/request_close(). The worker
-    // wakes whenever this differs from is_open() and reconciles by calling
-    // lifecycle_open()/lifecycle_close(). No queue — only the latest
-    // request matters, so back-to-back duplicates naturally collapse.
+    // reconciles via lifecycle_open()/lifecycle_close(). Duplicate requests
+    // collapse, but a cancelled attempt must close before any later reopen.
     std::atomic<bool> desired_open_{false};
+
+    std::atomic<bool> open_cancel_requested_{false};
+    // Guarded by lifecycle_mutex_; includes cleanup of a cancelled open.
+    bool lifecycle_busy_ = false;
 
     void ensure_lifecycle_worker();
     void lifecycle_loop();

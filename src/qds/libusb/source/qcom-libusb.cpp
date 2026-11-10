@@ -9,11 +9,18 @@
 #include <set>
 #include <vector>
 #include <string>
+#if defined(QCOM_LNX_ENV) || defined(__APPLE__)
+#include <queue>
+#include <pthread.h>
+#endif
 
 using namespace std;
 using namespace Utils;
 
 static struct libusb_context *g_ctx = nullptr;
+
+/* Access by qds_mac/libusbMac/qcdev.cpp to drive the event loop */
+libusb_context* get_libusb_context() { return g_ctx; }
 #define CHECK_LIBUSB_LOADED(retval)                                              \
     do {                                                                          \
         if (!is_libusb_loaded()) {                                                \
@@ -36,7 +43,7 @@ static struct libusb_context *g_ctx = nullptr;
 #ifdef QCOM_WIN_ENV
 extern std::atomic<BOOL> _IsQcomLibusbEnable;
 #endif
-#ifdef QCOM_LNX_ENV
+#if defined(QCOM_LNX_ENV) || defined(__APPLE__)
 #include "../../qds_lnx/inc/qdpublic.h"
 #endif
 static mutex qcomdevmap_mutex;
@@ -48,6 +55,72 @@ static unordered_map<string, QcomLibUSBdevCtx*> qcomdevmap;
 QcomLibUSBdevCtx *get_qcomdev_ctx_mapping(char *, libusb_device*);
 void remove_qcomdev_ctx_mapping(char *, libusb_device*);
 QcomLibUSBdevCtx* get_qcomdev_ctx_map(string);
+
+
+device_info::device_info()
+    : virtual_handle(0),
+      Flag(0),
+      protocol(0),
+      interfaceNumber(0),
+      bulk_in_endpointAddr(0),
+      bulk_out_endpointAddr(0),
+      bulk_in_size(0),
+      bulk_out_size(0),
+      DevDetailsMP(nullptr),
+      devCtx(nullptr)
+{
+    InitializeListHead(&List);
+    // Zero initialize string buffers
+    memset(DevDesc, 0, sizeof(DevDesc));
+    memset(DevName, 0, sizeof(DevName));
+    memset(Loc, 0, sizeof(Loc));
+    memset(DevPath, 0, sizeof(DevPath));
+    memset(SerNum, 0, sizeof(SerNum));
+    memset(SerNumMSM, 0, sizeof(SerNumMSM));
+    memset(HwId, 0, sizeof(HwId));
+    memset(ParentDev, 0, sizeof(ParentDev));
+    memset(SocVer, 0, sizeof(SocVer));
+    memset(ParentLocationInformation, 0, sizeof(ParentLocationInformation));
+    memset(DevDetails, 0, sizeof(DevDetails));
+}
+
+
+device_info::device_info(const device_info& other)
+    : virtual_handle(other.virtual_handle),
+      Flag(other.Flag),
+      protocol(other.protocol),
+      interfaceNumber(other.interfaceNumber),
+      bulk_in_endpointAddr(other.bulk_in_endpointAddr),
+      bulk_out_endpointAddr(other.bulk_out_endpointAddr),
+      bulk_in_size(other.bulk_in_size),
+      bulk_out_size(other.bulk_out_size),
+      devCtx(other.devCtx)  // shallow copy (assuming shared externally)
+{
+    InitializeListHead(&this->List);
+
+    // Copy all char arrays
+    memcpy(DevDesc, other.DevDesc, sizeof(DevDesc));
+    memcpy(DevName, other.DevName, sizeof(DevName));
+    memcpy(Loc, other.Loc, sizeof(Loc));
+    memcpy(DevPath, other.DevPath, sizeof(DevPath));
+    memcpy(SerNum, other.SerNum, sizeof(SerNum));
+    memcpy(SerNumMSM, other.SerNumMSM, sizeof(SerNumMSM));
+    memcpy(HwId, other.HwId, sizeof(HwId));
+    memcpy(ParentDev, other.ParentDev, sizeof(ParentDev));
+    memcpy(SocVer, other.SocVer, sizeof(SocVer));
+    memcpy(ParentLocationInformation, other.ParentLocationInformation, sizeof(ParentLocationInformation));
+    memcpy(DevDetails, other.DevDetails, sizeof(DevDetails));
+
+    // Deep copy unique_ptr
+    if (other.DevDetailsMP)
+    {
+        DevDetailsMP = std::make_unique<std::unordered_map<std::string, std::string>>(*other.DevDetailsMP);
+    }
+    else
+    {
+        DevDetailsMP = nullptr;
+    }
+}
 
 #ifdef QCOM_WIN_ENV
 
@@ -377,11 +450,7 @@ VOID clearLibusbDeviceCtx(QcomLibUSBdevCtx* qcom_dev)
     {
         pEntry = RemoveHeadList(ItemList);
         pItem = CONTAINING_RECORD(pEntry, QcomDeviceInfo, List);
-        if (pItem->DevDetailsMP) {
-            delete pItem->DevDetailsMP;
-            pItem->DevDetailsMP = nullptr;
-        }
-        free(pItem);
+        delete pItem;
     }
 
     return;
@@ -397,38 +466,46 @@ VOID clearLibusbArrivalDeviceCtx(QcomLibUSBdevCtx* qcom_dev)
     {
         pEntry = RemoveHeadList(ItemList);
         pItem = CONTAINING_RECORD(pEntry, QcomDeviceInfo, List);
-        if (pItem->DevDetailsMP) {
-            delete pItem->DevDetailsMP;
-            pItem->DevDetailsMP = nullptr;
-        }
-        free(pItem);
+        delete pItem;
     }
 
     return;
 }
 
-#ifdef QCOM_LNX_ENV
+#if defined(QCOM_LNX_ENV) || defined(__APPLE__)
+#ifndef __APPLE__
+#define PROC_MODULES_FILE "/proc/modules"
+
 BOOL IsQcomLibusbEnable()
 {
-    if (access(LIBUSB_CONFIG_FILE, R_OK) != 0) {
-        return 0;
+    static const char * const kmod_names[] = {
+        "qcom_usb", "qcom_usbnet", "QdssDiag", "GobiNet", "qtiDevInf"
+    };
+
+    FILE *file = fopen(PROC_MODULES_FILE, "r");
+    if (!file) {
+        QCD_Printf(Debug, "%s: unable to open %s: %s\n", __func__,
+            PROC_MODULES_FILE, strerror(errno));
+        return TRUE;
     }
 
-    FILE *file = fopen(LIBUSB_CONFIG_FILE, "r");
-    if (!file)
-        return 0;
-
-    char read_string[QCOM_MAX_STRING_SIZE];
-    while(fgets(read_string, sizeof(read_string), file)) {
-        if (strstr(read_string, "QCOM_LIBUSB_SUPPORT=1")) {
-            fclose(file);
-            return 1;
+    char line[QCOM_MAX_STRING_SIZE];
+    while (fgets(line, sizeof(line), file)) {
+        for (size_t i = 0; i < sizeof(kmod_names) / sizeof(kmod_names[0]); i++) {
+            size_t n = strlen(kmod_names[i]);
+            if (strncmp(line, kmod_names[i], n) == 0 &&
+                (line[n] == ' ' || line[n] == '\t')) {
+                fclose(file);
+                QCD_Printf(Debug, "%s: QUD kernel driver module(s) loaded; using kernel driver\n", __func__);
+                return FALSE;
+            }
         }
     }
 
     fclose(file);
-    return 0;
+    return TRUE;
 }
+#endif // !__APPLE__
 
 BOOL create_libusb_devnode(PQcomDeviceInfo newDeviceInf,
                            const char *devName,
@@ -475,22 +552,22 @@ const char *fetchFriendlyDeviceName(int protocol, const char *pid)
         return nullptr;
 }
 
+#if defined(QCOM_LNX_ENV) || defined(__APPLE__)
+/* forward declaration */
+static void post_arrival_work(libusb_device *dev, QcdevCtx *ctx);
+#endif
+
 BOOL libusb_device_change_callback(libusb_context* ctx,
     libusb_device* dev,
     libusb_hotplug_event event,
     void* user_data)
 {
-    DeviceCtx* device_ctx = static_cast<DeviceCtx*>(user_data);
-
-    if (device_ctx) {
-        QCD_Printf(Info, "%s: device_ctx: 0x%p, DevDesc: %s, SerNumMsm: %s\n",
-                   __func__, device_ctx, device_ctx->mDevParams.DevDesc,
-                   device_ctx->mDevParams.SerNumMsm);
-    }
+    QcdevCtx* device_ctx = static_cast<QcdevCtx*>(user_data);
 
     if (event == LIBUSB_HOTPLUG_EVENT_DEVICE_ARRIVED) {
         QCD_Printf(Info, "%s: LIBUSB Arrival: libusb_device dev: 0x%p\n", __func__, dev);
-        process_device(dev, device_ctx);
+        fn_libusb_ref_device(dev);
+        post_arrival_work(dev, device_ctx);
     }
     else if (event == LIBUSB_HOTPLUG_EVENT_DEVICE_LEFT) {
         QCD_Printf(Info, "%s: LIBUSB Departure: libusb_device dev: 0x%p\n", __func__, dev);
@@ -500,34 +577,110 @@ BOOL libusb_device_change_callback(libusb_context* ctx,
     return EXIT_SUCCESS;
 }
 
+static libusb_hotplug_callback_handle g_hotplug_handle = 0;
+
+#if defined(QCOM_LNX_ENV) || defined(__APPLE__)
+struct arrival_work {
+    libusb_device *dev;
+    QcdevCtx      *ctx;
+};
+
+static pthread_mutex_t  g_arrival_mtx    = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t   g_arrival_cv     = PTHREAD_COND_INITIALIZER;
+static queue<struct arrival_work> g_arrival_queue;
+static pthread_t        g_arrival_thread;
+static bool             g_arrival_stop   = false;
+
+static void post_arrival_work(libusb_device *dev, QcdevCtx *ctx)
+{
+    struct arrival_work w = {dev, ctx};
+    pthread_mutex_lock(&g_arrival_mtx);
+    g_arrival_queue.push(w);
+    pthread_cond_signal(&g_arrival_cv);
+    pthread_mutex_unlock(&g_arrival_mtx);
+}
+
+static void *arrival_worker_fn(void * /*arg*/)
+{
+    while (true) {
+        pthread_mutex_lock(&g_arrival_mtx);
+        while (g_arrival_queue.empty() && !g_arrival_stop)
+            pthread_cond_wait(&g_arrival_cv, &g_arrival_mtx);
+
+        if (g_arrival_stop && g_arrival_queue.empty()) {
+            pthread_mutex_unlock(&g_arrival_mtx);
+            break;
+        }
+        struct arrival_work w = g_arrival_queue.front();
+        g_arrival_queue.pop();
+        pthread_mutex_unlock(&g_arrival_mtx);
+
+        /* process_device may call fn_libusb_get_string_descriptor_ascii.
+         * We are NOT on the event-loop thread here, so the control transfer
+         * can complete without deadlocking. */
+        process_device(w.dev, w.ctx);
+
+        /* Release the reference taken in libusb_device_change_callback */
+        fn_libusb_unref_device(w.dev);
+    }
+    return nullptr;
+}
+
+void start_arrival_worker()
+{
+    g_arrival_stop = false;
+    int rc = pthread_create(&g_arrival_thread, NULL, arrival_worker_fn, NULL);
+    QCD_Printf(Info, "%s: arrival worker thread started rc=%d\n", __func__, rc);
+}
+
+void stop_arrival_worker()
+{
+    pthread_mutex_lock(&g_arrival_mtx);
+    g_arrival_stop = true;
+    pthread_cond_broadcast(&g_arrival_cv);
+    pthread_mutex_unlock(&g_arrival_mtx);
+    pthread_join(g_arrival_thread, NULL);
+    QCD_Printf(Info, "%s: arrival worker thread stopped\n", __func__);
+}
+#endif /* defined(QCOM_LNX_ENV) || defined(__APPLE__) */
+
 VOID register_libusb_hotplug_callback(void* device_ctx) {
     CHECK_LIBUSB_LOADED_VOID();
     if (fn_libusb_has_capability(LIBUSB_CAP_HAS_HOTPLUG)) {
         QCD_Printf(Info, "libusb hotplug feature is available\n");
 
-        DeviceCtx* deviceCtx = static_cast<DeviceCtx*>(device_ctx);
-        if (deviceCtx) {
-            QCD_Printf(Info, "%s: device_ctx: 0x%p, DevDesc: %s\n",
-                __func__, deviceCtx, deviceCtx->mDevParams.DevDesc);
-        }
+        void* deviceCtx = device_ctx;
 
-        fn_libusb_hotplug_register_callback(g_ctx,
+        int rc = fn_libusb_hotplug_register_callback(g_ctx,
             (libusb_hotplug_event)
-            LIBUSB_HOTPLUG_EVENT_DEVICE_ARRIVED |
-            LIBUSB_HOTPLUG_EVENT_DEVICE_LEFT,
+            (LIBUSB_HOTPLUG_EVENT_DEVICE_ARRIVED |
+             LIBUSB_HOTPLUG_EVENT_DEVICE_LEFT),
             LIBUSB_HOTPLUG_ENUMERATE,
             QCOM_VENDOR_ID,
             LIBUSB_HOTPLUG_MATCH_ANY,
             LIBUSB_HOTPLUG_MATCH_ANY,
             libusb_device_change_callback,
             deviceCtx,
-            NULL);
+            &g_hotplug_handle);
+        QCD_Printf(Info, "%s: fn_libusb_hotplug_register_callback rc=%d handle=%d\n",
+                   __func__, rc, (int)g_hotplug_handle);
     }
     else {
         QCD_Printf(Info, "libusb hotplug feature is not available\n");
     }
 
     return;
+}
+
+VOID unregister_libusb_hotplug_callback(void)
+{
+    CHECK_LIBUSB_LOADED_VOID();
+    if (!g_ctx || !g_hotplug_handle)
+        return;
+    fn_libusb_hotplug_deregister_callback(g_ctx, g_hotplug_handle);
+    QCD_Printf(Info, "%s: hotplug callback handle=%d deregistered\n",
+               __func__, (int)g_hotplug_handle);
+    g_hotplug_handle = 0;
 }
 
 #endif
@@ -558,17 +711,13 @@ BOOL remove_device(QcomLibUSBdevCtx* qcom_dev, libusb_device* dev, void* deviceC
             PLIST_ENTRY next = pos->Flink;
             pDevInfo = CONTAINING_RECORD(pos, QcomDeviceInfo, List);
             QCD_Printf(Info, "%s device desc: %s\n", __func__, pDevInfo->DevDesc);
-#ifdef QCOM_LNX_ENV
-            pDevInfo->Flag = ((ULONG)QC_DEV_TYPE_USB << 8) | QC_DEV_STATE_DEPARTURE << 4 | isQcDriver;
+#if defined(QCOM_LNX_ENV) || defined(__APPLE__)
+            pDevInfo->Flag = ((ULONG)QC_DEV_TYPE_USB << 8) | (QC_DEV_STATE_DEPARTURE << 4) | isQcDriver;
             PushLibUSBToApplication(pDevInfo);
             unlink(pDevInfo->DevDesc);
 #endif
-            if (pDevInfo->DevDetailsMP) {
-                delete pDevInfo->DevDetailsMP;
-                pDevInfo->DevDetailsMP = nullptr;
-            }
             RemoveEntryList(pos);
-            free(pDevInfo);
+            delete pDevInfo;
             pos = next;
         }
         //system("rm -rf /dev/QCOM_LIBUSB*");  //Added temporarily
@@ -627,12 +776,28 @@ void remove_qcomdev_ctx_mapping(char *serialNumMsm, libusb_device* dev)
             __func__, qcom_dev->qcomDevKey, qcom_dev->dev, dev);
         // ensure to free all QcomDeviceInfo entries, iterate deviceListHead
         if (qcom_dev->dev != nullptr && qcom_dev->dev == dev) {
+            qcom_dev->disconnect_event = true;
+            while (qcom_dev->ref_count != 0) {
+                QCD_Printf(Info, "%s: waiting for ref_count to drop (now %d, key=%s)\n",
+                           __func__, qcom_dev->ref_count.load(), qcom_dev->qcomDevKey);
+                lock.unlock();
+#ifdef QCOM_WIN_ENV
+                Sleep(100);
+#else
+                usleep(100000);
+#endif
+                lock.lock();
+            }
+            /* Wait for qcom_libusb_close to release dev_handle_mutex before freeing qcom_dev. */
+            {
+                lock_guard<mutex> drain(qcom_dev->dev_handle_mutex);
+            }
             remove_device(qcom_dev, qcom_dev->dev, nullptr);
             fn_libusb_unref_device(qcom_dev->dev);
             QCD_Printf(Info, "%s: unref libusb_device *dev: 0x%p (qcomDevKey=%s)\n",
                 __func__, qcom_dev->dev, qcom_dev->qcomDevKey);
             qcom_dev->dev = nullptr;
-            qcomdevmap.erase(iter);
+            qcomdevmap.erase(qcomdevkey);
             /* qcom_dev is allocated with new operator, free memory using delete which run the 
             destructors internally for (mutex,condition_variable,atomic) */
             delete qcom_dev;
@@ -750,6 +915,140 @@ QcomLibUSBdevCtx *get_qcomdev_ctx_mapping(char* serialNumMsm, libusb_device* dev
     return qcom_dev;
 }
 
+#ifdef __APPLE__
+static int create_busport_path(libusb_device *dev, char *out, size_t outsz)
+{
+    uint8_t busno = fn_libusb_get_bus_number(dev);
+    uint8_t ports[8];
+    int nports = fn_libusb_get_port_numbers(dev, ports, (int)sizeof(ports));
+    int off = snprintf(out, outsz, "%u", (unsigned)busno);
+    for (int pi = 0; pi < nports && off < (int)outsz - 2; pi++) {
+        out[off++] = (pi == 0) ? '-' : '.';
+        off += snprintf(out + off, outsz - (size_t)off, "%u", (unsigned)ports[pi]);
+    }
+    return nports;
+}
+
+static void fill_dev_location_params(
+        PQcomDeviceInfo                          di,
+        libusb_device                           *dev,
+        const char                              *portpath,
+        const struct libusb_device_descriptor   *desc,
+        const struct libusb_config_descriptor   *config,
+        const struct libusb_interface_descriptor *altsetting,
+        const char                              *serialNoMSM)
+{
+    uint8_t busno   = fn_libusb_get_bus_number(dev);
+    uint8_t devaddr = fn_libusb_get_device_address(dev);
+
+    snprintf(di->Loc, QCOM_MAX_STRING_SIZE,
+             "/dev/bus/usb/%03u/%03u", (unsigned)busno, (unsigned)devaddr);
+
+    if (config && altsetting)
+        snprintf(di->DevPath, QCOM_MAX_STRING_SIZE,
+                 "/devices/usb%u/%s/%s:%u.%u",
+                 (unsigned)busno, portpath, portpath,
+                 (unsigned)config->bConfigurationValue,
+                 (unsigned)altsetting->bInterfaceNumber);
+    else
+        snprintf(di->DevPath, QCOM_MAX_STRING_SIZE,
+                 "/devices/usb%u/%s", (unsigned)busno, portpath);
+
+    snprintf(di->HwId, QCOM_MAX_STRING_SIZE,
+             "USB\\VID_%04X&PID_%04X",
+             (unsigned)desc->idVendor, (unsigned)desc->idProduct);
+
+    if (serialNoMSM && serialNoMSM[0])
+        snprintf(di->ParentDev, QCOM_MAX_STRING_SIZE,
+                 "Qualcomm USB Composite Device:%s", serialNoMSM);
+
+    di->ParentLocationInformation[0] = '\0';
+
+    if (config && altsetting &&
+        altsetting->bInterfaceClass    == QCDEV_INTERFACE_CLASS_ADB &&
+        altsetting->bInterfaceSubClass == QCDEV_INTERFACE_SUBCLASS_ADB &&
+        altsetting->bInterfaceProtocol == QCDEV_INTERFACE_PROTOCOL_ADB)
+    {
+        strncpy(di->DevDesc, QCOM_ADB_DEV_NAME, QCOM_MAX_STRING_SIZE - 1);
+        di->DevDesc[QCOM_MAX_STRING_SIZE - 1] = '\0';
+        strncpy(di->DevName, QCOM_ADB_DEV_NAME, QCOM_MAX_STRING_SIZE - 1);
+        di->DevName[QCOM_MAX_STRING_SIZE - 1] = '\0';
+    }
+}
+
+static void create_composite_device(
+        QcomLibUSBdevCtx                        *qcom_dev,
+        libusb_device                           *dev,
+        const struct libusb_device_descriptor   *desc,
+        const char                              *serialNoMSM,
+        const char                              *serialNo,
+        const char                              *value,
+        const char                              *epm_device,
+        int                                      isQcDriver)
+{
+    uint8_t busno   = fn_libusb_get_bus_number(dev);
+    uint8_t devaddr = fn_libusb_get_device_address(dev);
+
+    char portpath[QCOM_MAX_STRING_SIZE];
+    create_busport_path(dev, portpath, sizeof(portpath));
+
+    PQcomDeviceInfo cd = new (std::nothrow) QcomDeviceInfo();
+    if (!cd) return;
+    InitializeListHead(&cd->List);
+
+    cd->devCtx          = qcom_dev;
+    cd->interfaceNumber = 0;
+
+    snprintf(cd->DevName, QCOM_MAX_STRING_SIZE,
+             "/dev/bus/usb/%03u/%03u", (unsigned)busno, (unsigned)devaddr);
+    strncpy(cd->Loc, cd->DevName, QCOM_MAX_STRING_SIZE - 1);
+    cd->Loc[QCOM_MAX_STRING_SIZE - 1] = '\0';
+
+    snprintf(cd->DevDesc, QCOM_MAX_STRING_SIZE,
+             "Qualcomm USB Composite Device:%s:%s:%03u/%03u",
+             serialNoMSM ? serialNoMSM : "",
+             serialNo    ? serialNo    : "",
+             (unsigned)busno, (unsigned)devaddr);
+
+    fill_dev_location_params(cd, dev, portpath, desc,
+                             NULL, NULL,
+                             serialNoMSM);
+
+    if (serialNo && serialNo[0]) {
+        strncpy(cd->SerNum, serialNo, QCOM_MAX_STRING_SIZE - 1);
+        cd->SerNum[QCOM_MAX_STRING_SIZE - 1] = '\0';
+    }
+    if (value && value[0]) {
+        strncpy(cd->SerNumMSM, value, QCOM_MAX_STRING_SIZE - 1);
+        cd->SerNumMSM[QCOM_MAX_STRING_SIZE - 1] = '\0';
+    }
+
+    strncpy(cd->ParentDev, cd->DevDesc, QCOM_MAX_STRING_SIZE - 1);
+    cd->ParentDev[QCOM_MAX_STRING_SIZE - 1] = '\0';
+
+    cd->protocol = 0;
+    cd->Flag     = ((ULONG)QC_DEV_TYPE_USB    << 8)  |
+                   ( QC_DEV_STATE_ARRIVAL      << 4)  |
+                   ((ULONG)QC_DEV_BUS_TYPE_USB << 16) |
+                   isQcDriver;
+
+    if (epm_device && epm_device[0]) {
+        strncpy(cd->DevDetails, epm_device, QCOM_MAX_STRING_SIZE - 1);
+        cd->DevDetails[QCOM_MAX_STRING_SIZE - 1] = '\0';
+    }
+    std::unordered_map<std::string, std::string> cdMP;
+    ParseDevDesc(cd->DevDetails, cdMP);
+    cd->DevDetailsMP = std::make_unique<std::unordered_map<std::string, std::string>>(cdMP);
+
+    QCD_Printf(Info,
+        "%s: composite device: DevDesc=%s DevName=%s DevPath=%s\n",
+        __func__, cd->DevDesc, cd->DevName, cd->DevPath);
+
+    PushLibUSBToApplication(cd);
+    InsertTailList(&qcom_dev->deviceListHead, &cd->List);
+}
+#endif /* __APPLE__ */
+
 BOOL process_device(libusb_device* dev, void* deviceCtx) {
     QcomLibUSBdevCtx* qcom_dev = nullptr;
     struct libusb_device_descriptor desc;
@@ -785,7 +1084,7 @@ BOOL process_device(libusb_device* dev, void* deviceCtx) {
     ZeroMemory(serialNoMSM, QCOM_MAX_STRING_SIZE);
     ZeroMemory(epm_device, QCOM_MAX_STRING_SIZE);
 #else
-    PDeviceCtx pdeviceCtx = (PDeviceCtx)deviceCtx;
+    PDeviceCtx pdeviceCtx = nullptr;
     memset(serialNo, 0, QCOM_MAX_STRING_SIZE);
     memset(serialNoMSM, 0, QCOM_MAX_STRING_SIZE);
     memset(epm_device, 0, QCOM_MAX_STRING_SIZE);
@@ -868,7 +1167,25 @@ BOOL process_device(libusb_device* dev, void* deviceCtx) {
     // set serNumMSM value in registry for QC_SPEC_SERNUM_MSM
 
     fn_libusb_close(handle);
-    
+
+#ifdef QCOM_LNX_ENV
+    if (deviceCtx && value) {
+        QcdevCtx* ctx = (QcdevCtx*)deviceCtx;
+        pthread_mutex_lock(&ctx->mListLock);
+        PDeviceCtx traversal = ctx->mpDeviceCtx;
+        while (traversal) {
+            if (traversal->mDevParams.SerNumMsm[0] != '\0' &&
+                strncasecmp(traversal->mDevParams.SerNumMsm, value, QCDEV_MAX_VALUE_NAME) == 0 &&
+                traversal->mDevParams.Protocol == 0x0) {
+                pdeviceCtx = traversal;
+                break;
+            }
+            traversal = (PDeviceCtx)traversal->mNext;
+        }
+        pthread_mutex_unlock(&ctx->mListLock);
+    }
+#endif
+
     unique_lock<mutex> lock(qcomdevmap_mutex);
     qcom_dev = get_qcomdev_ctx_mapping(value, dev);
     lock.unlock();
@@ -895,6 +1212,12 @@ BOOL process_device(libusb_device* dev, void* deviceCtx) {
         return ret;
     }
 
+#ifdef __APPLE__
+    /* Push composite entry before interfaces */
+    create_composite_device(qcom_dev, dev, &desc,
+                            serialNoMSM, serialNo, value, epm_device, isQcDriver);
+#endif /* __APPLE__ */
+
     // Iterate through interfaces
     for (int i = 0; i < config->bNumInterfaces; i++) {
         // Iterate through alternate settings
@@ -902,20 +1225,16 @@ BOOL process_device(libusb_device* dev, void* deviceCtx) {
 
         PQcomDeviceInfo NewDeviceInf;
 
-        NewDeviceInf = (PQcomDeviceInfo)malloc(sizeof(QcomDeviceInfo));
+        NewDeviceInf = new(std::nothrow) QcomDeviceInfo();
         if (!NewDeviceInf)
         {
-            QCD_Printf(Fatal, "Malloc failed\n");
+            QCD_Printf(Fatal, "DeviceInfo object allocation failed\n");
             fn_libusb_free_config_descriptor(config);
             return LIBUSB_ERROR_NO_MEM;
         }
         InitializeListHead(&NewDeviceInf->List);
 
-#ifdef QCOM_WIN_ENV
-        ZeroMemory(NewDeviceInf, sizeof(QcomDeviceInfo));
-#else
-        memset(NewDeviceInf, 0, sizeof(QcomDeviceInfo));
-#endif
+
 
         NewDeviceInf->interfaceNumber = altsetting->bInterfaceNumber;
         NewDeviceInf->devCtx = qcom_dev;
@@ -951,7 +1270,6 @@ BOOL process_device(libusb_device* dev, void* deviceCtx) {
         InsertTailList(&qcom_dev->deviceListHead, &NewDeviceInf->List);
 #else
     std::unordered_map<std::string, std::string> devDetailsMP;
-    devDetailsMP.clear();
     if (serialNo != NULL) {
         strncpy(NewDeviceInf->SerNum, serialNo, QCOM_MAX_STRING_SIZE - 1);
         NewDeviceInf->SerNum[QCOM_MAX_STRING_SIZE - 1] = '\0';
@@ -965,6 +1283,14 @@ BOOL process_device(libusb_device* dev, void* deviceCtx) {
         strncpy(NewDeviceInf->DevDetails, epm_device, QCOM_MAX_STRING_SIZE - 1);
         NewDeviceInf->DevDetails[QCOM_MAX_STRING_SIZE - 1] = '\0';
     }
+#ifdef __APPLE__
+    {
+        char portpath[QCOM_MAX_STRING_SIZE];
+        create_busport_path(dev, portpath, sizeof(portpath));
+        fill_dev_location_params(NewDeviceInf, dev, portpath,
+                                 &desc, config, altsetting, serialNoMSM);
+    }
+#else
     if (pdeviceCtx != NULL) {
         if (pdeviceCtx->mDevParams.DevPath) {
             strncpy(NewDeviceInf->DevPath, pdeviceCtx->mDevParams.DevPath, QCOM_MAX_STRING_SIZE - 1);
@@ -983,16 +1309,13 @@ BOOL process_device(libusb_device* dev, void* deviceCtx) {
             NewDeviceInf->ParentDev[QCOM_MAX_STRING_SIZE - 1] = '\0';
         }
         if (pdeviceCtx->mDevParams.ParentLocationInfomation) {
-            strncpy(NewDeviceInf->ParentLocationInformation, pdeviceCtx->mDevParams.ParentLocationInfomation,   QCOM_MAX_STRING_SIZE - 1);
+            strncpy(NewDeviceInf->ParentLocationInformation, pdeviceCtx->mDevParams.ParentLocationInfomation, QCOM_MAX_STRING_SIZE - 1);
             NewDeviceInf->ParentLocationInformation[QCOM_MAX_STRING_SIZE - 1] = '\0';
         }
-        NewDeviceInf->DevDetailsMP = new std::unordered_map<std::string, std::string>();
-        ParseDevDesc(NewDeviceInf->DevDetails, devDetailsMP);
-        if(NewDeviceInf->DevDetailsMP)
-        {
-            *(NewDeviceInf->DevDetailsMP) = devDetailsMP;
-        }
     }
+#endif /* __APPLE__ */
+    ParseDevDesc(NewDeviceInf->DevDetails, devDetailsMP);
+    NewDeviceInf->DevDetailsMP = std::make_unique<DevDetailsMap>(devDetailsMP);
     NewDeviceInf->protocol = altsetting->bInterfaceProtocol |
                              altsetting->bInterfaceClass << 8 |
                              altsetting->bAlternateSetting << 16 |
@@ -1016,7 +1339,17 @@ BOOL process_device(libusb_device* dev, void* deviceCtx) {
             PushLibUSBToApplication(NewDeviceInf);
             InsertTailList(&qcom_dev->deviceListHead, &NewDeviceInf->List);
         }
-#endif
+#ifdef __APPLE__
+        else if (altsetting->bInterfaceClass    == QCDEV_INTERFACE_CLASS_ADB &&
+                 altsetting->bInterfaceSubClass == QCDEV_INTERFACE_SUBCLASS_ADB &&
+                 altsetting->bInterfaceProtocol == QCDEV_INTERFACE_PROTOCOL_ADB)
+        {
+            NewDeviceInf->Flag = ((ULONG)QC_DEV_TYPE_USB << 8) | (QC_DEV_STATE_ARRIVAL << 4) | ((ULONG)QC_DEV_BUS_TYPE_USB << 16) | (isQcDriver);
+            PushLibUSBToApplication(NewDeviceInf);
+            InsertTailList(&qcom_dev->deviceListHead, &NewDeviceInf->List);
+        }
+#endif // __APPLE
+#endif // else -> QCOM_LNX_ENV
 
         //QCD_Printf(Info,"%s: p:%d, b:%d-%d\n", __func__, altsetting->bInterfaceProtocol, libusb_get_bus_number(dev), libusb_get_device_address(dev));
 
@@ -1062,7 +1395,7 @@ BOOL enumerate_devices()
 
 /* libusb core device communication API's */
 
-#ifdef QCOM_LNX_ENV
+#if defined(QCOM_LNX_ENV) || defined(__APPLE__)
 PQcomDeviceInfo find_device(PQcomLibUSBdevCtx devContext, const char* devDesc)
 {
     PLIST_ENTRY head = &devContext->deviceListHead;
@@ -1098,12 +1431,8 @@ VOID update_arrival_list_libusb(QcomLibUSBdevCtx* qcom_dev)
             while (pos_arrival != head_arrival) {
                 PLIST_ENTRY next = pos_arrival->Flink;
                 QcomDeviceInfo* pDevInfoFree = CONTAINING_RECORD(pos_arrival, QcomDeviceInfo, List);
-                if (pDevInfoFree->DevDetailsMP) {
-                    delete pDevInfoFree->DevDetailsMP;
-                    pDevInfoFree->DevDetailsMP = nullptr;
-                }
                 RemoveEntryList(pos_arrival);
-                free(pDevInfoFree);
+                delete pDevInfoFree;
                 pos_arrival = next;
             }
         QCD_Printf(Info, "%s: Cleared ArrivalListLibusb\n", __func__);
@@ -1142,12 +1471,8 @@ VOID update_arrival_list_libusb(QcomLibUSBdevCtx* qcom_dev)
                         QCD_Printf(Info, "%s: SerNumMSM: %s, new protocol: %d, removing old protocol: %d\n",
                             __func__, pDevExist->SerNumMSM, pDevInfo->protocol, pDevExist->protocol);
                         //PLIST_ENTRY next = pos_arrival->Flink;
-                        if (pDevExist->DevDetailsMP) {
-                            delete pDevExist->DevDetailsMP;
-                            pDevExist->DevDetailsMP = nullptr;
-                        }
                         RemoveEntryList(pos_arrival);
-                        free(pDevExist);
+                        delete pDevExist;
                         pos_arrival = next;
                         modeChangeDetected = true;
                         continue;
@@ -1164,10 +1489,8 @@ VOID update_arrival_list_libusb(QcomLibUSBdevCtx* qcom_dev)
                 continue;
         }
 
-        NewDevArrival = (PQcomDeviceInfo)malloc(sizeof(QcomDeviceInfo));
+        NewDevArrival = new(std::nothrow) QcomDeviceInfo(*pDevInfo);
         if (NewDevArrival) {
-            memcpy(NewDevArrival, pDevInfo, sizeof(QcomDeviceInfo));
-            InitializeListHead(&NewDevArrival->List);
             InsertTailList(&qcom_dev->ArrivalListLibusb, &NewDevArrival->List);
             count++;
             QCD_Printf(Info, "%s: cn:%d pDevInfo: 0x%p, NewDevArrival: 0x%p, SerNumMsm: %s, InfNo: %d, protocol: %d\n",
@@ -1331,7 +1654,7 @@ BOOL qcom_libusb_open_internal(QcomDeviceInfo* qcomDevInfo, void** devHandle)
     lock.unlock();
 
     QCD_Printf(Info, "%s: (key=%s) device opened and interface claimed successfully. ref_count: %d\n",
-        __func__, qcom_dev->qcomDevKey, qcom_dev->ref_count);
+        __func__, qcom_dev->qcomDevKey, qcom_dev->ref_count.load());
     QCD_Printf(Info, "%s: (key=%s) dev: 0x%p, qcomDevInfo: 0x%p, IntfNo: %d, VirtualHandle : 0x%llx\n",
         __func__, qcom_dev->qcomDevKey, qcom_dev->dev, qcomDevInfo, qcomDevInfo->interfaceNumber, qcomDevInfo->virtual_handle);
 
@@ -1423,7 +1746,9 @@ VOID QcomLibusbDevice::qcom_libusb_close(void** devHandle)
 
             if (qcom_dev->ref_count == 0) {
                 QCD_Printf(Info, "%s: closing real libusb dev_handle: %p\n", __func__, qcom_dev->dev_handle);
-                fn_libusb_close(qcom_dev->dev_handle);
+                if (!qcom_dev->disconnect_event && ret != LIBUSB_ERROR_NO_DEVICE) {
+                    fn_libusb_close(qcom_dev->dev_handle);
+                }
                 qcom_dev->dev_handle = nullptr;
 #ifdef QCOM_WIN_ENV
                 if (qcom_dev->dev) {
@@ -1433,7 +1758,7 @@ VOID QcomLibusbDevice::qcom_libusb_close(void** devHandle)
                 }
 #endif
             }
-            QCD_Printf(Info, "%s: (key=%s) close virtual Handle: 0x%llx, remaining open interfaces: %d\n", __func__, qcom_dev->qcomDevKey, virtualHandle, qcom_dev->ref_count);
+            QCD_Printf(Info, "%s: (key=%s) close virtual Handle: 0x%llx, remaining open interfaces: %d\n", __func__, qcom_dev->qcomDevKey, virtualHandle, qcom_dev->ref_count.load());
             *devHandle = nullptr;
     }
     else {
@@ -1454,10 +1779,11 @@ BOOL QcomLibusbDevice::qcom_libusb_read
 {
     int ret = LIBUSB_ERROR_OTHER;
     const int max_retries = 3;
+    const unsigned default_timeout_ms = 2000u;
     int attempt = 0;
-    
+
     if (timeOut == 0)
-	    timeOut = 2000;
+        timeOut = default_timeout_ms;
 
     if (*devHandle == nullptr || buffer == nullptr || bufferLen == 0)
     {
@@ -1477,6 +1803,12 @@ BOOL QcomLibusbDevice::qcom_libusb_read
     maplock.unlock();
 
     unique_lock<mutex> lock(qcom_dev->dev_handle_mutex);
+    if (!qcom_dev->dev_handle) {
+        QCD_Printf(Info, "%s: key=(%s) dev_handle null, device already gone\n",
+                   __func__, qcom_dev->qcomDevKey);
+        lock.unlock();
+        return LIBUSB_ERROR_NO_DEVICE;
+    }
     ++qcom_dev->active_transfer;
     lock.unlock();
 
@@ -1494,9 +1826,9 @@ BOOL QcomLibusbDevice::qcom_libusb_read
 		if (ret == LIBUSB_ERROR_PIPE)
 			fn_libusb_clear_halt(qcomDevInfo->devCtx->dev_handle, qcomDevInfo->bulk_in_endpointAddr);
 #ifdef QCOM_WIN_ENV
-                Sleep(500);
+                Sleep(100);
 #else
-                usleep(500000); /* 500ms delay between retries */
+                usleep(100000); /* 100ms delay between retries */
 #endif
             } else {
                 goto cleanup;
@@ -1549,6 +1881,12 @@ BOOL QcomLibusbDevice::qcom_libusb_write
     maplock.unlock();
 
     unique_lock<mutex> lock(qcom_dev->dev_handle_mutex);
+    if (!qcom_dev->dev_handle) {
+        QCD_Printf(Info, "%s: key=(%s) dev_handle null, device already gone\n",
+                   __func__, qcom_dev->qcomDevKey);
+        lock.unlock();
+        return LIBUSB_ERROR_NO_DEVICE;
+    }
     ++qcom_dev->active_transfer;
     lock.unlock();
 
@@ -1566,9 +1904,9 @@ BOOL QcomLibusbDevice::qcom_libusb_write
 		if (ret == LIBUSB_ERROR_PIPE)
 			fn_libusb_clear_halt(qcomDevInfo->devCtx->dev_handle, qcomDevInfo->bulk_out_endpointAddr);
 #ifdef QCOM_WIN_ENV
-                Sleep(500);
+                Sleep(100);
 #else
-                usleep(500000); /* 500ms delay between retries */
+                usleep(100000); /* 100ms delay between retries */
 #endif
             } else {
                 goto cleanup;
@@ -1601,12 +1939,12 @@ cleanup:
 BOOL initialize_libusb()
 {
     // Initialize libusb
-    QCD_Printf(Info, "%s\n", __func__);
     if (fn_libusb_init(&g_ctx) < 0) {
         QCD_Printf(Error, "Failed to initialize libusb\n");
         unload_libusb();
         return EXIT_FAILURE;
     }
+    QCD_Printf(Info, "%s entry g_ctx=%p\n", __func__, (void*)g_ctx);
 
     //libusb_set_option(g_ctx, LIBUSB_OPTION_LOG_LEVEL, LIBUSB_LOG_LEVEL_DEBUG); /* Enable libusb library logs */
 
@@ -1615,7 +1953,7 @@ BOOL initialize_libusb()
 
 VOID deinitialize_libusb()
 {
-#ifdef QCOM_LNX_ENV
+#if defined(QCOM_LNX_ENV) || defined(__APPLE__)
     system("rm -rf /dev/QCOM_LIBUSB*");
 #endif
     for(auto iter = qcomdevmap.begin(); iter != qcomdevmap.end();) {

@@ -1082,7 +1082,7 @@ QCDEVLIB_API BOOL QDAIO::SendToDevice(HANDLE AppHandle, PVOID TxBuffer,
     localAioCtx.mpNumBytesTxn = NumBytesSent;
     *localAioCtx.mpNumBytesTxn = 0;
 
-    userCtx = (PAIO_CONTEXT)malloc(sizeof(AIO_CONTEXT));
+    userCtx = new AIO_CONTEXT();
     userCtx->Callback = aioLocalCallback;
     userCtx->UserData = &localAioCtx;
 
@@ -1097,7 +1097,7 @@ QCDEVLIB_API BOOL QDAIO::SendToDevice(HANDLE AppHandle, PVOID TxBuffer,
     {
         QCDEV_LOG_ERR("Send submission failed.. errorCode: %d Number of Bytes to Send :%lu\nEnd of SendToDevice\n", status, NumBytesToSend);
         LeaveCriticalSection(&localAioCtx.mIoLock);
-        free(userCtx);
+        delete userCtx;
         return false;
     }
 
@@ -1120,7 +1120,7 @@ QCDEVLIB_API BOOL QDAIO::SendToDevice(HANDLE AppHandle, PVOID TxBuffer,
     }
 
     LeaveCriticalSection(&localAioCtx.mIoLock);
-    free(userCtx);
+    delete userCtx;
     QCDEV_LOG_INFO("Out <--\n");
     return localAioCtx.mpStatus;
 }
@@ -1151,7 +1151,7 @@ QCDEVLIB_API BOOL QDAIO::ReadFromDevice(HANDLE AppHandle, PVOID RxBuffer,
     localAioCtx.mpBuffer = RxBuffer;
     localAioCtx.mpNumBytesTxn = NumBytesReturned;
 
-    userCtx = (PAIO_CONTEXT)malloc(sizeof(AIO_CONTEXT));
+    userCtx = new AIO_CONTEXT();
     userCtx->Callback = aioLocalCallback;
     userCtx->UserData = &localAioCtx;
 
@@ -1166,7 +1166,7 @@ QCDEVLIB_API BOOL QDAIO::ReadFromDevice(HANDLE AppHandle, PVOID RxBuffer,
     {
         QCDEV_LOG_ERR("Read submission failed.. errorCode: %d Number of Bytes to Read :%lu\nEnd ReadFromDevice ......\n",status, NumBytesToRead);
         LeaveCriticalSection(&localAioCtx.mIoLock);
-        free(userCtx);
+        delete userCtx;
         return false;
     }
 
@@ -1190,7 +1190,7 @@ QCDEVLIB_API BOOL QDAIO::ReadFromDevice(HANDLE AppHandle, PVOID RxBuffer,
     }
 
     LeaveCriticalSection(&localAioCtx.mIoLock);
-    free(userCtx);
+    delete userCtx;
     QCDEV_LOG_INFO("Out <--\n");
     return localAioCtx.mpStatus;
 }

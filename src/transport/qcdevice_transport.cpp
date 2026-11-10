@@ -53,9 +53,8 @@ bool QcDeviceTransport::is_handle_valid() const {
 #endif
 }
 
-// Close the device handle. CancelIoEx unblocks any pending overlapped
-// read from the Protocol's RX thread before we hand the handle to
-// CloseDevice.
+// Only the lifecycle owner closes the handle, after all I/O threads have
+// exited (or before they have started when an open is cancelled).
 void QcDeviceTransport::close_handle() {
     if (!is_handle_valid()) {
         return;
@@ -71,7 +70,10 @@ void QcDeviceTransport::close_handle() {
     QcDevice::CloseDevice(h);
 }
 
-bool QcDeviceTransport::open() {
+bool QcDeviceTransport::open(const std::atomic<bool>& cancel_requested) {
+    if (cancel_requested.load()) {
+        return false;
+    }
     if (is_handle_valid()) {
         return true;  // Already open
     }
@@ -101,7 +103,7 @@ bool QcDeviceTransport::open() {
                           + " is already open by another process! ***\n"
                           "*** Close QUTS, Device Manager, or any other tool"
                           " using this port. ***\n"
-                          "*** While qualcomm-log-collector can open a shared handle,"
+                          "*** While qualcomm-device-configurator can open a shared handle,"
                           " responses will go to\n"
                           "*** the OTHER reader, causing loopback to fail."
                           " ***\n", true);
@@ -112,20 +114,23 @@ bool QcDeviceTransport::open() {
         }
     }
 
-    // Attempt to open with retries (matching TUF Usb::open pattern).
-    handle_ = QcDevice::OpenDevice(
-        const_cast<wchar_t*>(wide_name.c_str()),
-        static_cast<DWORD>(baud_rate_));
-#else
-    handle_ = QcDevice::OpenDevice(
-        const_cast<char*>(device_name_.c_str()));
 #endif
 
-    for (int retry = 0; !is_handle_valid() && retry < OPEN_RETRY_COUNT; ++retry) {
-        CFLOG_WARNING("QcDevice: Open failed, retrying (" + std::to_string(retry + 1)
-                  + "/" + std::to_string(OPEN_RETRY_COUNT) + ")...", true);
-        std::this_thread::sleep_for(
-            std::chrono::milliseconds(OPEN_RETRY_DELAY_MS));
+    for (int attempt = 0; attempt <= OPEN_RETRY_COUNT; ++attempt) {
+        if (attempt > 0) {
+            CFLOG_WARNING("QcDevice: Open failed, retrying (" + std::to_string(attempt) + "/" +
+                              std::to_string(OPEN_RETRY_COUNT) + ")...",
+                          true);
+            const auto deadline =
+                std::chrono::steady_clock::now() + std::chrono::milliseconds(OPEN_RETRY_DELAY_MS);
+            constexpr auto CANCEL_POLL_INTERVAL = std::chrono::milliseconds(10);
+            while (!cancel_requested.load() && std::chrono::steady_clock::now() < deadline) {
+                std::this_thread::sleep_for(CANCEL_POLL_INTERVAL);
+            }
+        }
+        if (cancel_requested.load()) {
+            return false;
+        }
 
 #ifdef TOOLS_TARGET_WINDOWS
         handle_ = QcDevice::OpenDevice(
@@ -135,6 +140,15 @@ bool QcDeviceTransport::open() {
         handle_ = QcDevice::OpenDevice(
             const_cast<char*>(device_name_.c_str()));
 #endif
+        // The native open cannot be interrupted. Dispose of a handle that
+        // arrives after cancellation on this same worker, before starting I/O.
+        if (cancel_requested.load()) {
+            close();
+            return false;
+        }
+        if (is_handle_valid()) {
+            break;
+        }
     }
 
     if (!is_handle_valid()) {
@@ -161,8 +175,7 @@ void QcDeviceTransport::close() {
         return;
     }
 
-    // Closing the handle unblocks any pending ReadFromDevice in the
-    // Protocol's RX thread; the Protocol owns thread join.
+    // Protocol joins the TX/RX threads before closing the device handle.
     close_handle();
 }
 
@@ -219,15 +232,11 @@ size_t QcDeviceTransport::write(const uint8_t* data, size_t len) {
     return static_cast<size_t>(total_sent);
 }
 
-// Single-shot device-level read. Blocks in QcDevice::ReadFromDevice until
-// the device returns data or the handle is closed (CancelIoEx unblocks
-// the pending read on shutdown). The timeout_ms parameter is ignored —
-// QcDevice::ReadFromDevice has no native timeout; the Protocol's RX thread
-// just re-enters this call in a loop and shutdown is signalled by
-// close_handle().
-size_t QcDeviceTransport::read(uint8_t* buf,
-                               size_t max_len,
-                               uint32_t /*timeout_ms*/) {
+// QDS controls the timeout of this blocking read; timeout_ms cannot override
+// it. On shutdown, Protocol waits for the read and RX loop to finish before
+// closing the handle. A read failure marks the link disconnected so the RX
+// loop exits; handle cleanup belongs to the lifecycle worker.
+size_t QcDeviceTransport::read(uint8_t* buf, size_t max_len, uint32_t /*timeout_ms*/) {
     if (!is_handle_valid() || max_len == 0) {
         return 0;
     }
@@ -235,11 +244,7 @@ size_t QcDeviceTransport::read(uint8_t* buf,
     DWORD bytes_read = 0;
     bool ok = false;
     try {
-        ok = !!QcDevice::ReadFromDevice(
-            handle_,
-            buf,
-            static_cast<DWORD>(max_len),
-            &bytes_read);
+        ok = !!QcDevice::ReadFromDevice(handle_, buf, static_cast<DWORD>(max_len), &bytes_read);
     } catch (...) {
         ok = false;
     }
@@ -249,13 +254,12 @@ size_t QcDeviceTransport::read(uint8_t* buf,
             CFLOG_ERROR("QcDevice: ReadFromDevice FAILED, device disconnected", true);
             state_.store(TransportState::DISCONNECTED);
         }
-        close_handle();
         return 0;
     }
 
     if (bytes_read > 0 && verbose_) {
-        FLOG_DEBUG("QcDevice: RX " + std::to_string(bytes_read) + " bytes: ["
-                  + hex_dump(buf, bytes_read, 48) + "]");
+        FLOG_DEBUG("QcDevice: RX " + std::to_string(bytes_read) + " bytes: [" +
+                   hex_dump(buf, bytes_read, 48) + "]");
     }
     return static_cast<size_t>(bytes_read);
 }

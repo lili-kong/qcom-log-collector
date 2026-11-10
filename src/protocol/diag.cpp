@@ -64,11 +64,13 @@ bool Diag::lifecycle_open() {
     }
     set_state(STATE_INITIALIZING);
 
-    if (!do_connection()) {
+    if (!do_connection() || open_cancelled()) {
         // The port is up but the device never answered — distinguish that
         // from an absent device so callers can tell "unplugged" from
         // "plugged in but not talking".
-        set_state(STATE_UNRESPONSIVE);
+        if (!open_cancelled()) {
+            set_state(STATE_UNRESPONSIVE);
+        }
         lifecycle_close();
         return false;
     }
@@ -78,12 +80,18 @@ bool Diag::lifecycle_open() {
 }
 
 bool Diag::do_connection() {
+    if (open_cancelled()) {
+        return false;
+    }
     framing_mode_ = FramingMode::HDLC;
     hdlc_decoder_ = HdlcDecoder();
     non_hdlc_decoder_.reset();
 
     CFLOG_INFO("do_connection: Sending loopback...", true);
     if (!do_loopback()) {
+        if (open_cancelled()) {
+            return false;
+        }
         CFLOG_ERROR("Error: Device did not respond to loopback.\n"
                   "  Possible causes:\n"
                   "  1. Another application (QUTS, Diag Tool, etc.) has the COM port open\n"
@@ -92,11 +100,16 @@ bool Diag::do_connection() {
                   "  3. The device is in a mode that does not respond to diag commands.\n", true);
         return false;
     }
+    if (open_cancelled()) {
+        return false;
+    }
     CFLOG_INFO("Device connected.", true);
 
     CFLOG_INFO("Running device handshake...", true);
     if (!do_handshake()) {
-        CFLOG_WARNING("Error: Device handshake failed.", true);
+        if (!open_cancelled()) {
+            CFLOG_WARNING("Error: Device handshake failed.", true);
+        }
         return false;
     }
 
@@ -139,7 +152,7 @@ ByteBuffer Diag::send_and_wait(const ByteBuffer& payload, uint32_t timeout_ms) {
         std::chrono::milliseconds(timeout_ms));
 
     if (resp.empty()) {
-        if (io_running_.load()) {
+        if (io_running_.load() && !open_cancelled()) {
             verbose_log("  -> Timeout waiting for response");
             // Link is still up but the device stopped answering. Only
             // downgrade from AVAILABLE: during the connect handshake we are
@@ -183,17 +196,27 @@ bool Diag::do_loopback() {
         // absorbed by receiver_loop() and discarded as an unpaired frame,
         // since no request is pending yet.
         static const uint8_t HDLC_LOOPBACK_RAW[] = { 0x7B, 0x2C, 0x3D, 0x7E };
-        submit_tx(ByteBuffer(HDLC_LOOPBACK_RAW,
-                             HDLC_LOOPBACK_RAW + sizeof(HDLC_LOOPBACK_RAW)));
+        if (!submit_tx(
+                ByteBuffer(HDLC_LOOPBACK_RAW, HDLC_LOOPBACK_RAW + sizeof(HDLC_LOOPBACK_RAW)))) {
+            return false;
+        }
         verbose_log("Sent raw HDLC loopback (4 bytes) to ensure HDLC mode");
-        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        if (wait_for_open_cancel(std::chrono::milliseconds(200))) {
+            return false;
+        }
     }
 
     ByteBuffer request = build_loopback_request();
 
     static constexpr int MAX_LOOPBACK_ATTEMPTS = 3;
     for (int attempt = 0; attempt < MAX_LOOPBACK_ATTEMPTS; ++attempt) {
+        if (open_cancelled()) {
+            return false;
+        }
         ByteBuffer response = send_and_wait(request);
+        if (open_cancelled()) {
+            return false;
+        }
         if (!response.empty() && response[0] == DiagCmd::LOOPBACK) {
             return true;
         }
@@ -225,6 +248,9 @@ bool Diag::request_non_hdlc_switch() {
 }
 
 bool Diag::do_handshake() {
+    if (open_cancelled()) {
+        return false;
+    }
     // STATUS request
     {
         ByteBuffer cmd = build_status_request();
@@ -244,6 +270,9 @@ bool Diag::do_handshake() {
     }
 
     // Non-HDLC switch
+    if (open_cancelled()) {
+        return false;
+    }
     if (config_.hdlc_only) {
         verbose_log("Handshake: HDLC-only mode enabled, NOT switching to Non-HDLC");
     } else {
@@ -255,6 +284,9 @@ bool Diag::do_handshake() {
         }
     }
 
+    if (open_cancelled()) {
+        return false;
+    }
     verbose_log("Handshake complete.");
     return true;
 }

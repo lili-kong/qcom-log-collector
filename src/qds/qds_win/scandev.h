@@ -33,6 +33,7 @@ typedef enum _QC_REG_LOC
    QC_REG_PORTS  = 4,
    QC_REG_ADB    = 5,
    QC_REG_LIBUSB = 6,
+   QC_REG_EUD    = 7,
    QC_REG_MAX
 } QC_REG_LOC;
 
@@ -55,6 +56,7 @@ typedef enum _QC_REG_LOC
 #define QC_SPEC             "AssignedPortForQCDevice"
 #define QC_SPEC_NET         "QCDeviceControlFile"
 #define QC_SPEC_STAMP       "QCDeviceStamp"
+#define QC_SPEC_GENERATION  "QCDeviceGeneration"
 #define QC_SPEC_MTU         "QCAdvertisedMtu"
 #define QC_SPEC_SERNUM      "QCDeviceSerialNumber"
 #define QC_SPEC_SOCVER      "QCDeviceSOCVER"
@@ -124,12 +126,19 @@ typedef struct _QC_DEV_ITEM
    CHAR SerNumMsm[256];
    CHAR PortNos[256];
    UCHAR BusType;
-   std::unordered_map<std::string, std::string>* DevDetails; // pointer-based: contains fields obtained from parsed device description string
+   DWORD Generation;
+   std::unique_ptr<DevDetailsMap> DevDetails; /* Using unique ptr to avoid calling the destructor */
+   _QC_DEV_ITEM();
+   _QC_DEV_ITEM(const _QC_DEV_ITEM& other);
+   ~_QC_DEV_ITEM() = default;
+   void reset();
 } QC_DEV_ITEM, *PQC_DEV_ITEM;
 
 typedef struct _QC_NOTIFICATION_STORE
 {
    LIST_ENTRY List;
    LIST_ENTRY DevItemChain;
+   _QC_NOTIFICATION_STORE();
+   ~_QC_NOTIFICATION_STORE() {}
 } QC_NOTIFICATION_STORE, *PQC_NOTIFICATION_STORE;
 #endif // SCANDEV_H

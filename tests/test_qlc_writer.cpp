@@ -10,6 +10,7 @@
 #include <iostream>
 
 #include "file_writer/qlc_writer.h"
+#include "version.h"
 
 using namespace QC;
 
@@ -63,6 +64,16 @@ static uint16_t read_u16_le(const uint8_t* p) {
     return static_cast<uint16_t>(p[0]) | (static_cast<uint16_t>(p[1]) << 8);
 }
 
+// Mirrors QlcWriter's internal write_fixed_ascii(): truncates to `width`
+// bytes, zero-padding if `str` is shorter.
+static ByteBuffer expected_fixed_ascii(const std::string& str, size_t width) {
+    ByteBuffer buf;
+    for (size_t i = 0; i < width; ++i) {
+        buf.push_back(i < str.size() ? static_cast<uint8_t>(str[i]) : 0x00);
+    }
+    return buf;
+}
+
 // =====================================================================
 // Default metadata (empty/zeroed)
 // =====================================================================
@@ -79,7 +90,8 @@ TEST(write_defaults) {
 
     size_t off = 0;
     ASSERT_EQ(read_u32_le(data.data() + off), 26u); off += 4;
-    ASSERT_TRUE(memcmp(data.data() + off, "v0.0.1", 6) == 0); off += 6;
+    ByteBuffer expected_version = expected_fixed_ascii(QC::kToolVersion, 6);
+    ASSERT_TRUE(memcmp(data.data() + off, expected_version.data(), 6) == 0); off += 6;
     ASSERT_EQ(data[off], 1); off += 1;  // HDLC default
     ASSERT_EQ(read_u32_le(data.data() + off), 0u); off += 4;  // GUIDListEntryCount
     ASSERT_EQ(read_u32_le(data.data() + off), 0u); off += 4;  // DiagIDEntryCount
@@ -133,7 +145,8 @@ TEST(write_populated) {
     off += 4;
 
     // Version
-    ASSERT_TRUE(memcmp(data.data() + off, "v0.0.1", 6) == 0); off += 6;
+    ByteBuffer expected_version = expected_fixed_ascii(QC::kToolVersion, 6);
+    ASSERT_TRUE(memcmp(data.data() + off, expected_version.data(), 6) == 0); off += 6;
 
     // HDLCDataType = 0
     ASSERT_EQ(data[off], 0); off += 1;

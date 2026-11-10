@@ -32,7 +32,7 @@
 #define CONTAINING_RECORD(address, type, field) (\
         (type *)((char*)(address) -(unsigned long)(&((type *)0)->field)))
 
-#pragma pack(1)
+#pragma pack(push, 8)   /* align structs to 8 bytes — matches qdpublic.h convention */
 
 typedef struct _LIST_ENTRY {
    struct _LIST_ENTRY* Flink;
@@ -51,6 +51,7 @@ struct utils_mutex_holder
 {
    pthread_mutex_t* mutex;
 };
+#pragma pack(pop)   /* restore alignment saved by push above */
 #endif
 
 VOID FORCEINLINE

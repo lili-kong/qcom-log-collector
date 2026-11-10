@@ -88,46 +88,27 @@ static void assign_handles(const std::string& group_key, QC::ProtocolInfo& info)
     }
 }
 
-// Build the device-level view of the protocol the monitor just reported.
-// Called exactly once per QcDevice callback, at the callback boundary — see
-// device_change_callback. The result is a *seed*: the registry keeps it as the
-// device's DeviceInfo on first presence, and otherwise discards it in favour of
-// the record it already holds. `protocols` is left empty; add_protocol_locked()
-// fills it.
-static QC::DeviceInfo build_device_info(const QC::ProtocolInfo& first) {
-    QC::DeviceInfo dev{};
-    dev.device_handle = first.device_handle;
-    dev.description = first.parent_device.empty()
-        ? first.description : first.parent_device;
-    dev.device_physical_location = first.parent_location;
-    dev.location = first.parent_location;
-    dev.adb_serial_number = first.adb_serial_number;
-    dev.serial_number = first.msm_serial_number;
-    dev.vid = first.vid;
-    dev.pid = first.pid;
-    dev.edl_chip_id = first.edl_chip_id;
-    dev.soc_info.chip_name = first.soc_version;
-    dev.soc_info.version = first.soc_version;
-    return dev;
-}
-
 // Fill in any device-level field still empty from a later protocol. QDS does
 // not report every field on every interface, so a sibling arriving later may
 // carry a serial number or SoC version the first one lacked.
-static void merge_device_fields(QC::DeviceInfo& dev, const QC::ProtocolInfo& proto) {
-    if (dev.adb_serial_number.empty() && !proto.adb_serial_number.empty())
-        dev.adb_serial_number = proto.adb_serial_number;
-    if (dev.serial_number.empty() && !proto.msm_serial_number.empty())
-        dev.serial_number = proto.msm_serial_number;
-    if (dev.vid.empty() && !proto.vid.empty())
-        dev.vid = proto.vid;
-    if (dev.pid.empty() && !proto.pid.empty())
-        dev.pid = proto.pid;
-    if (dev.edl_chip_id.empty() && !proto.edl_chip_id.empty())
-        dev.edl_chip_id = proto.edl_chip_id;
-    if (dev.soc_info.version.empty() && !proto.soc_version.empty()) {
-        dev.soc_info.chip_name = proto.soc_version;
-        dev.soc_info.version = proto.soc_version;
+static void merge_device_fields(QC::DeviceInfo& dev, const QC::DeviceInfo& seed) {
+    if (dev.adb_serial_number.empty() && !seed.adb_serial_number.empty()) {
+        dev.adb_serial_number = seed.adb_serial_number;
+    }
+    if (dev.serial_number.empty() && !seed.serial_number.empty()) {
+        dev.serial_number = seed.serial_number;
+    }
+    if (dev.vid.empty() && !seed.vid.empty()) {
+        dev.vid = seed.vid;
+    }
+    if (dev.pid.empty() && !seed.pid.empty()) {
+        dev.pid = seed.pid;
+    }
+    if (dev.edl_chip_id.empty() && !seed.edl_chip_id.empty()) {
+        dev.edl_chip_id = seed.edl_chip_id;
+    }
+    if (dev.soc_info.version.empty() && !seed.soc_info.version.empty()) {
+        dev.soc_info = seed.soc_info;
     }
 }
 
@@ -179,7 +160,7 @@ static QC::ProtocolInfo& add_protocol_locked(const std::string& group_key,
     for (auto& present : record.info.protocols) {
         if (present.description == info.description) {
             present = info;
-            merge_device_fields(record.info, present);
+            merge_device_fields(record.info, seed);
             return present;
         }
     }
@@ -202,7 +183,7 @@ static QC::ProtocolInfo& add_protocol_locked(const std::string& group_key,
     }
 
     QC::ProtocolInfo& stored = record.info.protocols.back();
-    merge_device_fields(record.info, stored);
+    merge_device_fields(record.info, seed);
     return stored;
 }
 
@@ -437,6 +418,32 @@ static std::string extract_edl_chip_id(const std::string& hw_id) {
     return it != segments.end() ? it->second : std::string();
 }
 
+// Build device metadata directly from QDS; ProtocolInfo contains only the
+// public interface fields. Later arrivals can fill gaps in the cached device.
+static QC::DeviceInfo build_device_info(const CB_PARAMS& params, const std::string& description,
+                                        const std::string& parent_device) {
+    QC::DeviceInfo dev{};
+    dev.description = parent_device.empty() ? description : parent_device;
+#ifdef TOOLS_TARGET_WINDOWS
+    const std::string hw_id = from_wide(params.HwId);
+    dev.location = from_wide(params.ParentLocationInfomation);
+    dev.adb_serial_number = from_wide(params.SerNum);
+    dev.serial_number = from_wide(params.SerNumMsm);
+    dev.soc_info.version = from_wide(params.SocVer);
+#else
+    const std::string hw_id = params.HwId ? params.HwId : "";
+    dev.location = params.ParentLocationInfomation ? params.ParentLocationInfomation : "";
+    dev.adb_serial_number = params.SerNum ? params.SerNum : "";
+    dev.serial_number = params.SerNumMsm ? params.SerNumMsm : "";
+    dev.soc_info.version = params.SocVer ? params.SocVer : "";
+#endif
+    dev.device_physical_location = dev.location;
+    dev.soc_info.chip_name = dev.soc_info.version;
+    std::tie(dev.vid, dev.pid) = extract_vid_pid(hw_id);
+    dev.edl_chip_id = extract_edl_chip_id(hw_id);
+    return dev;
+}
+
 // Whether a description names an interface QDS may report ambiguously: both
 // DIAG and SAHARA surface as "Diagnostics"/"DIAG".
 static bool is_ambiguous_diag(const std::string& desc) {
@@ -463,9 +470,8 @@ static void resolve_diag_ambiguity_locked(QC::DeviceInfo& dev) {
 // this is the device's first presence. When this is the device's first
 // protocol, the device-connected edge fires first, so a listener learns about
 // the device before hearing about its protocols.
-static void handle_protocol_arrival(const std::string& group_key,
-                                    const QC::ProtocolInfo& info,
-                                    const QC::DeviceInfo& seed) {
+static void handle_protocol_arrival(const std::string& group_key, const QC::ProtocolInfo& info,
+                                    const QC::DeviceInfo& seed, bool has_parent) {
     QC::DeviceInfo device;
     QC::ProtocolInfo reported;
     bool device_connected = false;
@@ -475,7 +481,7 @@ static void handle_protocol_arrival(const std::string& group_key,
                                                       &device_connected);
         // Standalone (non-composite) interfaces have no parent to group under,
         // so sibling count tells us nothing about them.
-        if (!stored.parent_device.empty()) {
+        if (has_parent) {
             resolve_diag_ambiguity_locked(g_available_devices[group_key].info);
         }
         device = g_available_devices[group_key].info;
@@ -525,42 +531,21 @@ static VOID device_change_callback(PCB_PARAMS pCbParams, PVOID* /*context*/)
 
     QC::ProtocolInfo info{};
 #ifdef TOOLS_TARGET_WINDOWS
-    const std::string hw_id = from_wide(pCbParams->HwId);
     info.description = from_wide(pCbParams->DevDesc);
-    info.parent_device = from_wide(pCbParams->ParentDev);
-    info.parent_location = from_wide(pCbParams->ParentLocationInfomation);
-    info.adb_serial_number = from_wide(pCbParams->SerNum);
-    info.msm_serial_number = from_wide(pCbParams->SerNumMsm);
-    info.soc_version = from_wide(pCbParams->SocVer);
+    const std::string parent_device = from_wide(pCbParams->ParentDev);
 #else
-    const std::string hw_id = pCbParams->HwId ? pCbParams->HwId : "";
     info.description = pCbParams->DevDesc;
-    info.parent_device = pCbParams->ParentDev ? pCbParams->ParentDev : "";
-    info.parent_location = pCbParams->ParentLocationInfomation
-        ? pCbParams->ParentLocationInfomation : "";
-    info.adb_serial_number = pCbParams->SerNum ? pCbParams->SerNum : "";
-    info.msm_serial_number = pCbParams->SerNumMsm ? pCbParams->SerNumMsm : "";
-    info.soc_version = pCbParams->SocVer ? pCbParams->SocVer : "";
+    const std::string parent_device = pCbParams->ParentDev ? pCbParams->ParentDev : "";
 #endif
-    info.com_port = QC::TransportManager::extract_com_port(info.description);
-    info.protocol_type = resolve_protocol(pCbParams->Protocol, info.description,
-                                          info.parent_device);
-    info.flags = pCbParams->Flag;
-    std::tie(info.vid, info.pid) = extract_vid_pid(hw_id);
-    info.edl_chip_id = extract_edl_chip_id(hw_id);
+    info.protocol_type = resolve_protocol(pCbParams->Protocol, info.description, parent_device);
 
-    const std::string group_key = device_group_key(
-        info.parent_device, info.parent_location, info.description);
+    auto seed = build_device_info(*pCbParams, info.description, parent_device);
+    const std::string group_key = device_group_key(parent_device, seed.location, info.description);
     assign_handles(group_key, info);
-
-    // Build the device view once, here at the callback boundary, from the fully
-    // populated ProtocolInfo. Downstream this is only a seed: the registry
-    // adopts it on the device's first presence and otherwise keeps the record
-    // it already has.
-    const QC::DeviceInfo seed = build_device_info(info);
+    seed.device_handle = info.device_handle;
 
     if (devState == 1) {        // QC_DEV_STATE_ARRIVAL
-        handle_protocol_arrival(group_key, info, seed);
+        handle_protocol_arrival(group_key, info, seed, !parent_device.empty());
     } else if (devState == 2) { // QC_DEV_STATE_DEPARTURE
         handle_protocol_departure(group_key, info, seed);
     }
@@ -714,11 +699,11 @@ std::vector<ProtocolInfo> TransportManager::enumerate_devices() {
         while (ptr < end && *ptr != '\0') {
             ProtocolInfo info{};
             info.description = ptr;
-            info.com_port = extract_com_port(info.description);
+            const std::string com_port = extract_com_port(info.description);
 
             std::string log_msg = "  [" + std::to_string(idx++) + "] \"" + info.description + "\"";
-            if (!info.com_port.empty()) {
-                log_msg += " (" + info.com_port + ")";
+            if (!com_port.empty()) {
+                log_msg += " (" + com_port + ")";
             }
             CFLOG_DEBUG(log_msg, true);
 

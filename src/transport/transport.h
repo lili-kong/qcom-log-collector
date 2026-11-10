@@ -37,7 +37,9 @@ public:
     // unique_ptr<Transport>; they are not meant for business logic, which
     // goes through the Protocol API instead.
 
-    virtual bool open() = 0;
+    /// Open cooperatively, checking cancellation during retries and waits.
+    /// The caller keeps cancel_requested alive until this call returns.
+    virtual bool open(const std::atomic<bool>& cancel_requested) = 0;
     virtual void close() = 0;
 
     /// Write data to the transport. Returns number of bytes written.
